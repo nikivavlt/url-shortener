@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package user.v1;
+option go_package = "github.com/nikivavlt/url-shortener/shared/pkg/proto/user/v1;user_v1";
+
+service UserService {
+  rpc Register (RegisterRequest) returns (RegisterResponse);
+  rpc Login (LoginRequest) returns (LoginResponse);
+  rpc Logout (LogoutRequest) returns (LogoutResponse);
+  rpc ValidateSession (ValidateSessionRequest) returns (ValidateSessionResponse);
+  rpc RefreshToken (RefreshTokenRequest) returns (RefreshTokenResponse);
+  rpc GetLimit (GetLimitRequest) returns (GetLimitResponse);
+}
+
+message RegisterRequest { string email = 1; string password = 2; }
+message RegisterResponse { string user_id = 1; }
+
+message LoginRequest { string email = 1; string password = 2; }
+message LoginResponse { string access_token = 1; string refresh_token = 2; }
+
+message LogoutRequest { string session_id = 1; }
+message LogoutResponse {}
+
+message ValidateSessionRequest { string access_token = 1; }
+message ValidateSessionResponse { string user_id = 1; string session_id = 2; }
+
+message RefreshTokenRequest { string refresh_token = 1; }
+message RefreshTokenResponse { string access_token = 1; }
+
+message GetLimitRequest { string user_id = 1; }
+message GetLimitResponse { int32 links_limit = 1; }
