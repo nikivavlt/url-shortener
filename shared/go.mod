@@ -1,10 +1,15 @@
 module github.com/nikivavlt/url-shortener/shared
 
-go 1.23
+go 1.26.0
 
-// Общий модуль с контрактами всех сервисов:
-//   shared/proto/<service>/v1/*.proto   — исходники (пишешь руками)
-//   shared/pkg/proto/<service>/v1/*.go  — сгенерированный buf'ом Go-код
-//
-// Зависимости сгенерированного кода (google.golang.org/grpc,
-// google.golang.org/protobuf) подтянутся через `go mod tidy`.
+require (
+	google.golang.org/grpc v1.84.0
+	google.golang.org/protobuf v1.36.11
+)
+
+require (
+	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
+)

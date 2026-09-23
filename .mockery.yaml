@@ -4,10 +4,8 @@ dir: "{{.InterfaceDir}}/mocks"
 mockname: "Mock{{.InterfaceName}}"
 outpkg: "mocks"
 packages:
-  github.com/yourname/url-shortener/user/internal/repository:
+  github.com/nikivavlt/url-shortener/user/internal/service:
     interfaces:
-      UserRepository:
-      SessionRepository:
-  github.com/yourname/url-shortener/user/internal/service:
-    interfaces:
-      TokenIssuer:
+      UserRepository: {}
+      Cache: {}
+      Auth: {}

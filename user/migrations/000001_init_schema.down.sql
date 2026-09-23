@@ -1,4 +1,4 @@
-DROP TABLE sessions
-DROP TABLE subscriptions
-DROP TABLE users
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS subscriptions;
+DROP TABLE IF EXISTS users;
 /* if exists??

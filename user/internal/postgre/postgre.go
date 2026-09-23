@@ -13,11 +13,8 @@ func NewPool(databaseURL string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse database config: %w", err)
 	}
-	// pool
-
 	config.MaxConns = 10
 	config.MinConns = 2
-	config.MaxConnLifetime = time.Hour
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {

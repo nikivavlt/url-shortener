@@ -10,17 +10,16 @@ import (
 
 type Config struct {
 	DatabaseURL     string
-	redisHost       string
-	redisPort       string
-	jwtSecret       string
-	accessTokenTTL  time.Duration
-	refreshTokenTTL time.Duration
+	RedisHost       string
+	RedisPort       string
+	JWTSecret       string
+	AccessTokenTTL  time.Duration
+	RefreshTokenTTL time.Duration
 	UserServicePort string
 }
 
 func Load() (*Config, error) {
-	err := godotenv.Load("../.env")
-	if err != nil {
+	if err := godotenv.Load("user/.env"); err != nil {
 		return nil, fmt.Errorf("load .env: %w", err)
 	}
 
@@ -61,11 +60,11 @@ func Load() (*Config, error) {
 
 	return &Config{
 		DatabaseURL:     databaseURL,
-		redisHost:       redisHost,
-		redisPort:       redisPort,
-		jwtSecret:       jwtSecret,
-		accessTokenTTL:  accessTokenTTL,
-		refreshTokenTTL: refreshTokenTTL,
+		RedisHost:       redisHost,
+		RedisPort:       redisPort,
+		JWTSecret:       jwtSecret,
+		AccessTokenTTL:  accessTokenTTL,
+		RefreshTokenTTL: refreshTokenTTL,
 		UserServicePort: userServicePort,
 	}, nil
 }
@@ -81,6 +80,9 @@ func envString(key string) (string, error) {
 
 func envDuration(key string) (time.Duration, error) {
 	value := os.Getenv(key)
+	if value == "" {
+		return 0, fmt.Errorf("environment variable %q is required", key)
+	}
 
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
