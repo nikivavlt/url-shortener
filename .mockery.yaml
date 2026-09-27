@@ -9,3 +9,8 @@ packages:
       UserRepository: {}
       Cache: {}
       Auth: {}
+  github.com/nikivavlt/url-shortener/url/internal/service:
+    interfaces:
+      Repository: {}
+      Cache: {}
+      UserClient: {}
