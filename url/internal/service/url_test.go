@@ -59,7 +59,6 @@ func TestCreateShortURL_Success(t *testing.T) {
 		return l.ShortCode == "abc1234" && l.UserID == "u1" && l.IsActive &&
 			l.ExpiresAt == nil && l.CreatedAt.Equal(fixedNow) && l.UpdatedAt.Equal(fixedNow)
 	})).Return(nil).Once()
-	// DecrCounter has no expectation: calling it would fail the test.
 
 	out, err := d.svc.CreateShortURL(ctx, validInput())
 
@@ -74,7 +73,6 @@ func TestCreateShortURL_LimitExceeded_CounterRolledBack(t *testing.T) {
 	d.cache.EXPECT().GetCounter(mock.Anything, "u1").Return(3, nil).Once()
 	d.cache.EXPECT().IncrCounter(mock.Anything, "u1").Return(4, nil).Once()
 	d.cache.EXPECT().DecrCounter(mock.Anything, "u1").Return(3, nil).Once()
-	// No Insert expectation: Mongo must not be touched.
 
 	_, err := d.svc.CreateShortURL(context.Background(), validInput())
 
