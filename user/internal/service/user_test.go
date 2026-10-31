@@ -84,6 +84,53 @@ func TestUserService_Login_WrongPassword(t *testing.T) {
 	require.Empty(t, refresh)
 
 	repo.AssertNotCalled(t, "CreateSession", mock.Anything, mock.Anything, mock.Anything)
-	authn.AssertNotCalled(t, "SignAccess", mock.Anything, mock.Anything)
-	authn.AssertNotCalled(t, "SignRefresh", mock.Anything, mock.Anything)
+	authn.AssertNotCalled(t, "Sign", mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestUserService_ValidateSession_RequiresAccessToken(t *testing.T) {
+	repo := mocks.NewMockUserRepository(t)
+	cache := mocks.NewMockCache(t)
+	authn := mocks.NewMockAuth(t)
+
+	const (
+		accessToken = "access-token"
+		sid         = "session-123"
+		userID      = "user-123"
+	)
+
+	authn.On("Parse", accessToken, service.TokenTypeAccess).Return(userID, sid, nil).Once()
+	cache.On("GetSession", mock.Anything, sid).Return(userID, nil).Once()
+
+	svc := service.New(repo, cache, authn, testAccessTTL, testRefreshTTL)
+
+	gotUserID, gotSID, err := svc.ValidateSession(context.Background(), accessToken)
+
+	require.NoError(t, err)
+	require.Equal(t, userID, gotUserID)
+	require.Equal(t, sid, gotSID)
+}
+
+func TestUserService_RefreshToken_RequiresRefreshToken(t *testing.T) {
+	repo := mocks.NewMockUserRepository(t)
+	cache := mocks.NewMockCache(t)
+	authn := mocks.NewMockAuth(t)
+
+	const (
+		refreshToken = "refresh-token"
+		accessToken  = "new-access-token"
+		sid          = "session-123"
+		userID       = "user-123"
+	)
+
+	authn.On("Parse", refreshToken, service.TokenTypeRefresh).Return(userID, sid, nil).Once()
+	cache.On("GetSession", mock.Anything, sid).Return(userID, nil).Once()
+	authn.On("Sign", userID, sid, service.TokenTypeAccess).Return(accessToken, nil).Once()
+	cache.On("SetSession", mock.Anything, sid, userID, testAccessTTL).Return(nil).Once()
+
+	svc := service.New(repo, cache, authn, testAccessTTL, testRefreshTTL)
+
+	gotAccessToken, err := svc.RefreshToken(context.Background(), refreshToken)
+
+	require.NoError(t, err)
+	require.Equal(t, accessToken, gotAccessToken)
 }
