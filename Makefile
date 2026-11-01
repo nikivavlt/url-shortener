@@ -3,21 +3,29 @@
 -include user/.env
 export
 
-.PHONY: proto-gen run test lint up down migrate-up migrate-down
+.PHONY: proto-gen run-gateway run-user run-url test test-int lint up down migrate-up migrate-down
 
-# Генерация Go-кода из .proto через buf (конфиг — shared/proto/buf.gen.yaml)
 proto-gen:
 	cd shared/proto && buf generate
 
-# Запуск User Service
-run:
+# Execute
+run-gateway:
+	go run ./gateway/cmd
+
+run-user:
 	go run ./user/cmd
 
-# Тесты
+run-url:
+	go run ./url/cmd
+
+# Tests
 test:
 	go test -race -v ./user/...
 
-# Линтер
+test-int:
+	go test -tags=integration ./integration/...
+
+# Linter
 lint:
 	golangci-lint run ./user/...
 
@@ -28,7 +36,7 @@ up:
 down:
 	docker compose down
 
-# Миграции
+# Migration
 migrate-up:
 	migrate -path user/migrations -database "$(DATABASE_URL)" up
 
