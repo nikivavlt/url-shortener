@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/nikivavlt/url-shortener/user/internal/service"
 )
 
 func TestPassword(t *testing.T) {
@@ -25,12 +28,12 @@ func TestPassword(t *testing.T) {
 func TestAccessToken(t *testing.T) {
 	auth := New("secret", time.Minute, time.Hour)
 
-	token, err := auth.SignAccess("user-1", "session-1")
+	token, err := auth.Sign("user-1", "session-1", service.TokenTypeAccess)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	userID, sid, err := auth.Parse(token)
+	userID, sid, err := auth.Parse(token, service.TokenTypeAccess)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,12 +50,12 @@ func TestAccessToken(t *testing.T) {
 func TestRefreshToken(t *testing.T) {
 	auth := New("secret", time.Minute, time.Hour)
 
-	token, err := auth.SignRefresh("user-1", "session-1")
+	token, err := auth.Sign("user-1", "session-1", service.TokenTypeRefresh)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	userID, sid, err := auth.Parse(token)
+	userID, sid, err := auth.Parse(token, service.TokenTypeRefresh)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,10 +65,24 @@ func TestRefreshToken(t *testing.T) {
 	}
 }
 
+func TestParseRejectsWrongTokenType(t *testing.T) {
+	auth := New("secret", time.Minute, time.Hour)
+
+	token, err := auth.Sign("user-1", "session-1", service.TokenTypeRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = auth.Parse(token, service.TokenTypeAccess)
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expected ErrInvalidToken, got %v", err)
+	}
+}
+
 func TestParseInvalidToken(t *testing.T) {
 	auth := New("secret", time.Minute, time.Hour)
 
-	_, _, err := auth.Parse("invalid-token")
+	_, _, err := auth.Parse("invalid-token", service.TokenTypeRefresh)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -75,12 +92,12 @@ func TestParseWrongSecret(t *testing.T) {
 	auth := New("secret", time.Minute, time.Hour)
 	other := New("other-secret", time.Minute, time.Hour)
 
-	token, err := auth.SignAccess("user-1", "session-1")
+	token, err := auth.Sign("user-1", "session-1", service.TokenTypeAccess)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, _, err = other.Parse(token)
+	_, _, err = other.Parse(token, service.TokenTypeAccess)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -89,12 +106,12 @@ func TestParseWrongSecret(t *testing.T) {
 func TestParseExpiredToken(t *testing.T) {
 	auth := New("secret", -time.Minute, time.Hour)
 
-	token, err := auth.SignAccess("user-1", "session-1")
+	token, err := auth.Sign("user-1", "session-1", service.TokenTypeAccess)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, _, err = auth.Parse(token)
+	_, _, err = auth.Parse(token, service.TokenTypeAccess)
 	if err == nil {
 		t.Fatal("expected expired token error")
 	}
