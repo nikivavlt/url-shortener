@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/nikivavlt/url-shortener/user/internal/service"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -14,7 +15,8 @@ const issuer = "url-shortener-user"
 var ErrInvalidToken = errors.New("invalid token")
 
 type tokenClaims struct {
-	SID string `json:"sid"`
+	SID       string `json:"sid"`
+	TokenType string `json:"token_type"`
 	jwt.RegisteredClaims
 }
 
@@ -44,18 +46,21 @@ func (a *Auth) ComparePassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
-func (a *Auth) SignAccess(userID, sid string) (string, error) {
-	return a.sign(userID, sid, a.accessTTL)
-}
+func (a *Auth) Sign(userID, sid string, tokenType service.TokenType) (string, error) {
+	var ttl time.Duration
+	switch tokenType {
+	case service.TokenTypeAccess:
+		ttl = a.accessTTL
+	case service.TokenTypeRefresh:
+		ttl = a.refreshTTL
+	default:
+		return "", fmt.Errorf("unsupported token type %q", tokenType)
+	}
 
-func (a *Auth) SignRefresh(userID, sid string) (string, error) {
-	return a.sign(userID, sid, a.refreshTTL)
-}
-
-func (a *Auth) sign(userID, sid string, ttl time.Duration) (string, error) {
 	now := time.Now()
 	claims := tokenClaims{
-		SID: sid,
+		SID:       sid,
+		TokenType: string(tokenType),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID,
 			Issuer:    issuer,
@@ -72,7 +77,7 @@ func (a *Auth) sign(userID, sid string, ttl time.Duration) (string, error) {
 	return signed, nil
 }
 
-func (a *Auth) Parse(token string) (userID string, sid string, err error) {
+func (a *Auth) Parse(token string, tokenType service.TokenType) (userID string, sid string, err error) {
 	var claims tokenClaims
 
 	_, err = jwt.ParseWithClaims(
@@ -89,6 +94,10 @@ func (a *Auth) Parse(token string) (userID string, sid string, err error) {
 	)
 	if err != nil {
 		return "", "", fmt.Errorf("%w: %v", ErrInvalidToken, err)
+	}
+
+	if claims.TokenType != string(tokenType) {
+		return "", "", fmt.Errorf("%w: unexpected token type", ErrInvalidToken)
 	}
 
 	return claims.Subject, claims.SID, nil

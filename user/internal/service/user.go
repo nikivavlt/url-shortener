@@ -35,12 +35,17 @@ type Cache interface {
 	DelSession(ctx context.Context, sid string) error
 }
 
+type TokenType string
+const (
+	TokenTypeAccess TokenType = "accessToken"
+	TokenTypeRefresh TokenType = "refreshToken"
+)
+
 type Auth interface {
 	HashPassword(password string) (string, error)
 	ComparePassword(hash, password string) error
-	SignAccess(userID, sid string) (string, error)
-	SignRefresh(userID, sid string) (string, error)
-	Parse(token string) (userID, sid string, err error)
+	Sign(userID, sid string, tokenType TokenType) (string, error)
+	Parse(token string, tokenType TokenType) (userID, sid string, err error)
 }
 
 type UserService struct {
@@ -109,11 +114,11 @@ func (s *UserService) Login(ctx context.Context, email, password string) (access
 		return "", "", fmt.Errorf("create session: %w", err)
 	}
 
-	accessToken, err = s.auth.SignAccess(userID, sid)
+	accessToken, err = s.auth.Sign(userID, sid, TokenTypeAccess)
 	if err != nil {
 		return "", "", fmt.Errorf("sign access: %w", err)
 	}
-	refreshToken, err = s.auth.SignRefresh(userID, sid)
+	refreshToken, err = s.auth.Sign(userID, sid, TokenTypeRefresh)
 	if err != nil {
 		return "", "", fmt.Errorf("sign refresh: %w", err)
 	}
@@ -134,7 +139,7 @@ func (s *UserService) Logout(ctx context.Context, sid string) error {
 }
 
 func (s *UserService) ValidateSession(ctx context.Context, accessToken string) (userID, sid string, err error) {
-	_, sid, err = s.auth.Parse(accessToken)
+	_, sid, err = s.auth.Parse(accessToken, TokenTypeAccess)
 	if err != nil {
 		return "", "", ErrUnauthenticated
 	}
@@ -148,7 +153,7 @@ func (s *UserService) ValidateSession(ctx context.Context, accessToken string) (
 }
 
 func (s *UserService) RefreshToken(ctx context.Context, refreshToken string) (string, error) {
-	_, sid, err := s.auth.Parse(refreshToken)
+	_, sid, err := s.auth.Parse(refreshToken, TokenTypeRefresh)
 	if err != nil {
 		return "", ErrUnauthenticated
 	}
@@ -158,7 +163,7 @@ func (s *UserService) RefreshToken(ctx context.Context, refreshToken string) (st
 		return "", err
 	}
 
-	accessToken, err := s.auth.SignAccess(userID, sid)
+	accessToken, err := s.auth.Sign(userID, sid, TokenTypeAccess)
 	if err != nil {
 		return "", fmt.Errorf("sign access: %w", err)
 	}
