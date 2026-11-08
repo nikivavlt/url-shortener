@@ -17,7 +17,7 @@ type URLService interface {
 	GetURL(ctx context.Context, shortCode string) (*domain.Link, error)
 	DeleteURL(ctx context.Context, shortCode, userID string) error
 	ListUserURLs(ctx context.Context, userID string, limit int32, cursor string) (domain.ListOutput, error)
-	Redirect(ctx context.Context, shortCode string) (string, error)
+	Redirect(ctx context.Context, in domain.RedirectInput) (string, error)
 }
 
 type URLHandler struct {
@@ -82,7 +82,12 @@ func (h *URLHandler) ListUserURLs(ctx context.Context, req *urlv1.ListUserURLsRe
 }
 
 func (h *URLHandler) Redirect(ctx context.Context, req *urlv1.RedirectRequest) (*urlv1.RedirectResponse, error) {
-	originalURL, err := h.svc.Redirect(ctx, req.GetShortCode())
+	originalURL, err := h.svc.Redirect(ctx, domain.RedirectInput{
+		ShortCode: req.GetShortCode(),
+		IP:        req.GetIp(),
+		UserAgent: req.GetUserAgent(),
+		Referer:   req.GetReferer(),
+	})
 	if err != nil {
 		return nil, toGRPCError(err)
 	}

@@ -31,8 +31,8 @@ type Repository interface {
 }
 
 type Cache interface {
-	GetLink(ctx context.Context, shortCode string) (string, error)
-	SetLink(ctx context.Context, shortCode, originalURL string, ttl time.Duration) error
+	GetLink(ctx context.Context, shortCode string) (*domain.Link, error)
+	SetLink(ctx context.Context, shortCode string, link *domain.Link, ttl time.Duration) error
 	DelLink(ctx context.Context, shortCode string) error
 
 	GetLimit(ctx context.Context, userID string) (int64, error)
@@ -48,10 +48,15 @@ type UserClient interface {
 	GetLimit(ctx context.Context, userID string) (int64, error)
 }
 
+type Broker interface {
+	WriteMessages(ctx context.Context, message domain.BrokerMessage) error
+}
+
 type URLService struct {
 	repo         Repository
 	cache        Cache
 	users        UserClient
+	broker       Broker
 	shortURLBase string
 	log          *slog.Logger
 
@@ -60,11 +65,12 @@ type URLService struct {
 	newCode func() (string, error)
 }
 
-func New(repo Repository, cache Cache, users UserClient, shortURLBase string) *URLService {
+func New(repo Repository, cache Cache, users UserClient, broker Broker, shortURLBase string) *URLService {
 	return &URLService{
 		repo:         repo,
 		cache:        cache,
 		users:        users,
+		broker:       broker,
 		shortURLBase: strings.TrimRight(shortURLBase, "/"),
 		log:          slog.Default().With("component", "url_service"),
 		now:          func() time.Time { return time.Now().UTC() },
@@ -197,20 +203,21 @@ func (s *URLService) ListUserURLs(ctx context.Context, userID string, limit int3
 	return out, nil
 }
 
-func (s *URLService) Redirect(ctx context.Context, shortCode string) (string, error) {
-	if shortCode == "" {
+func (s *URLService) Redirect(ctx context.Context, in domain.RedirectInput) (string, error) {
+	if in.ShortCode == "" {
 		return "", fmt.Errorf("%w: short_code is required", domain.ErrInvalidArgument)
 	}
 
-	originalURL, err := s.cache.GetLink(ctx, shortCode)
+	link, err := s.cache.GetLink(ctx, in.ShortCode)
 	switch {
 	case err == nil:
-		return originalURL, nil
+		s.publishClickAsync(ctx, s.clickEvent(link, in))
+		return link.OriginalURL, nil
 	case !errors.Is(err, domain.ErrCacheMiss):
-		s.log.Warn("redirect cache read failed", "short_code", shortCode, "err", err)
+		s.log.Warn("redirect cache read failed", "short_code", in.ShortCode, "err", err)
 	}
 
-	link, err := s.repo.FindByShortCode(ctx, shortCode)
+	link, err = s.repo.FindByShortCode(ctx, in.ShortCode)
 	if err != nil {
 		return "", err
 	}
@@ -220,15 +227,48 @@ func (s *URLService) Redirect(ctx context.Context, shortCode string) (string, er
 		return "", domain.ErrLinkNotFound
 	}
 
+	s.publishClickAsync(ctx, s.clickEvent(link, in))
+
 	var ttl time.Duration
 	if link.ExpiresAt != nil {
 		ttl = link.ExpiresAt.Sub(now)
 	}
-	if err := s.cache.SetLink(ctx, shortCode, link.OriginalURL, ttl); err != nil {
-		s.log.Warn("redirect cache write failed", "short_code", shortCode, "err", err)
+	if err := s.cache.SetLink(ctx, in.ShortCode, link, ttl); err != nil {
+		s.log.Warn("redirect cache write failed", "short_code", in.ShortCode, "err", err)
 	}
 
 	return link.OriginalURL, nil
+}
+
+func (s *URLService) clickEvent(link *domain.Link, in domain.RedirectInput) domain.BrokerMessage {
+	return domain.BrokerMessage{
+		ShortCode: in.ShortCode,
+		UserID:    link.UserID,
+		ClickedAt: s.now(),
+		IP:        in.IP,
+		UserAgent: in.UserAgent,
+		Referer:   in.Referer,
+	}
+}
+
+func (s *URLService) publishClickAsync(
+	requestCtx context.Context,
+	event domain.BrokerMessage,
+) {
+	go func() {
+		ctx, cancel := context.WithTimeout(
+			context.WithoutCancel(requestCtx),
+			3*time.Second,
+		)
+		defer cancel()
+
+		if err := s.broker.WriteMessages(ctx, event); err != nil {
+			s.log.Error("publish click event failed",
+				"short_code", event.ShortCode,
+				"err", err,
+			)
+		}
+	}()
 }
 
 func (s *URLService) linksLimit(ctx context.Context, userID string) (int64, error) {
