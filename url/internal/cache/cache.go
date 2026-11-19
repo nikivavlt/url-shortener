@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -23,20 +24,33 @@ func New(rdb redis.UniversalClient) *Cache {
 	return &Cache{rdb: rdb}
 }
 
-func (c *Cache) GetLink(ctx context.Context, shortCode string) (string, error) {
-	v, err := c.rdb.Get(ctx, linkKey(shortCode)).Result()
-	if errors.Is(err, redis.Nil) {
-		return "", domain.ErrCacheMiss
-	}
-	if err != nil {
-		return "", fmt.Errorf("get link: %w", err)
-	}
-
-	return v, nil
+type cachedLink struct {
+	OriginalURL string `json:"original_url"`
+	UserID      string `json:"user_id"`
 }
 
-func (c *Cache) SetLink(ctx context.Context, shortCode string, originalURL string, ttl time.Duration) error {
-	return c.rdb.Set(ctx, linkKey(shortCode), originalURL, ttl).Err()
+func (c *Cache) GetLink(ctx context.Context, shortCode string) (*domain.Link, error) {
+	v, err := c.rdb.Get(ctx, linkKey(shortCode)).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, domain.ErrCacheMiss
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get link: %w", err)
+	}
+
+	var cached cachedLink
+	if err := json.Unmarshal([]byte(v), &cached); err != nil {
+		return nil, fmt.Errorf("decode cached link: %w", err)
+	}
+	return &domain.Link{ShortCode: shortCode, OriginalURL: cached.OriginalURL, UserID: cached.UserID}, nil
+}
+
+func (c *Cache) SetLink(ctx context.Context, shortCode string, link *domain.Link, ttl time.Duration) error {
+	data, err := json.Marshal(cachedLink{OriginalURL: link.OriginalURL, UserID: link.UserID})
+	if err != nil {
+		return fmt.Errorf("encode cached link: %w", err)
+	}
+	return c.rdb.Set(ctx, linkKey(shortCode), data, ttl).Err()
 }
 
 func (c *Cache) DelLink(ctx context.Context, shortCode string) error {

@@ -16,20 +16,22 @@ import (
 var fixedNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
 type deps struct {
-	repo  *mocks.MockRepository
-	cache *mocks.MockCache
-	users *mocks.MockUserClient
-	svc   *URLService
+	repo   *mocks.MockRepository
+	cache  *mocks.MockCache
+	users  *mocks.MockUserClient
+	broker *mocks.MockBroker
+	svc    *URLService
 }
 
 func newDeps(t *testing.T) deps {
 	t.Helper()
 	d := deps{
-		repo:  mocks.NewMockRepository(t),
-		cache: mocks.NewMockCache(t),
-		users: mocks.NewMockUserClient(t),
+		repo:   mocks.NewMockRepository(t),
+		cache:  mocks.NewMockCache(t),
+		users:  mocks.NewMockUserClient(t),
+		broker: mocks.NewMockBroker(t),
 	}
-	d.svc = New(d.repo, d.cache, d.users, "https://short.url/")
+	d.svc = New(d.repo, d.cache, d.users, d.broker, "https://short.url/")
 	d.svc.now = func() time.Time { return fixedNow }
 	return d
 }
@@ -184,29 +186,66 @@ func TestDeleteURL_Success(t *testing.T) {
 func TestRedirect_CacheMiss_WarmsCacheWithExpiryTTL(t *testing.T) {
 	d := newDeps(t)
 	exp := fixedNow.Add(time.Hour)
+	input := domain.RedirectInput{ShortCode: "abc1234", IP: "127.0.0.1", UserAgent: "grpcurl", Referer: "https://example.test"}
+	published := make(chan struct{})
 
-	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").Return("", domain.ErrCacheMiss).Once()
+	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").Return(nil, domain.ErrCacheMiss).Once()
 	d.repo.EXPECT().FindByShortCode(mock.Anything, "abc1234").
-		Return(&domain.Link{OriginalURL: "https://example.com", IsActive: true, ExpiresAt: &exp}, nil).Once()
-	d.cache.EXPECT().SetLink(mock.Anything, "abc1234", "https://example.com", time.Hour).Return(nil).Once()
+		Return(&domain.Link{ShortCode: "abc1234", OriginalURL: "https://example.com", UserID: "u1", IsActive: true, ExpiresAt: &exp}, nil).Once()
+	d.cache.EXPECT().SetLink(mock.Anything, "abc1234", mock.MatchedBy(func(link *domain.Link) bool {
+		return link.OriginalURL == "https://example.com" && link.UserID == "u1"
+	}), time.Hour).Return(nil).Once()
+	d.broker.EXPECT().WriteMessages(mock.Anything, domain.BrokerMessage{
+		ShortCode: "abc1234", UserID: "u1", ClickedAt: fixedNow,
+		IP: "127.0.0.1", UserAgent: "grpcurl", Referer: "https://example.test",
+	}).Run(func(context.Context, domain.BrokerMessage) { close(published) }).Return(nil).Once()
 
-	got, err := d.svc.Redirect(context.Background(), "abc1234")
+	got, err := d.svc.Redirect(context.Background(), input)
 
 	require.NoError(t, err)
 	assert.Equal(t, "https://example.com", got)
+	awaitPublish(t, published)
+}
+
+func TestRedirect_CacheHit_PublishesClick(t *testing.T) {
+	d := newDeps(t)
+	published := make(chan struct{})
+	input := domain.RedirectInput{ShortCode: "abc1234", IP: "127.0.0.1", UserAgent: "grpcurl", Referer: "https://example.test"}
+
+	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").
+		Return(&domain.Link{ShortCode: "abc1234", OriginalURL: "https://example.com", UserID: "u1"}, nil).Once()
+	d.broker.EXPECT().WriteMessages(mock.Anything, domain.BrokerMessage{
+		ShortCode: "abc1234", UserID: "u1", ClickedAt: fixedNow,
+		IP: "127.0.0.1", UserAgent: "grpcurl", Referer: "https://example.test",
+	}).Run(func(context.Context, domain.BrokerMessage) { close(published) }).Return(nil).Once()
+
+	got, err := d.svc.Redirect(context.Background(), input)
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.com", got)
+	awaitPublish(t, published)
 }
 
 func TestRedirect_ExpiredNotCached(t *testing.T) {
 	d := newDeps(t)
 	exp := fixedNow.Add(-time.Second)
 
-	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").Return("", domain.ErrCacheMiss).Once()
+	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").Return(nil, domain.ErrCacheMiss).Once()
 	d.repo.EXPECT().FindByShortCode(mock.Anything, "abc1234").
 		Return(&domain.Link{OriginalURL: "https://example.com", IsActive: true, ExpiresAt: &exp}, nil).Once()
 
-	_, err := d.svc.Redirect(context.Background(), "abc1234")
+	_, err := d.svc.Redirect(context.Background(), domain.RedirectInput{ShortCode: "abc1234"})
 
 	require.ErrorIs(t, err, domain.ErrLinkNotFound)
+}
+
+func awaitPublish(t *testing.T, published <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("click event was not published")
+	}
 }
 
 func TestListUserURLs_Pagination(t *testing.T) {
