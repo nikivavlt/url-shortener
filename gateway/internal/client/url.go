@@ -15,8 +15,11 @@ type URLClient struct {
 	timeout time.Duration
 }
 
-func DialURL(ctx context.Context, address string) (*URLClient, error) {
-	conn, err := grpc.DialContext(ctx, address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func DialURL(address string) (*URLClient, error) {
+	conn, err := grpc.NewClient(
+		address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		return nil, err
 	}

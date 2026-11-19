@@ -23,14 +23,13 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	// dial user method?
-	userClient, err := client.DialUser(context.Background(), cfg.UserServiceAddr)
+	userClient, err := client.DialUser(cfg.UserServiceAddr)
 	if err != nil {
 		log.Fatalf("user service client: %v", err)
 	}
 	defer userClient.Close()
 
-	urlClient, err := client.DialURL(context.Background(), cfg.UrlServiceAddr)
+	urlClient, err := client.DialURL(cfg.UrlServiceAddr)
 	if err != nil {
 		log.Fatalf("url service client: %v", err)
 	}
@@ -48,13 +47,14 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	serverErrors := make(chan error, 1) // ??
+
+	serverErrors := make(chan error, 1)
 	go func() {
 		log.Printf("gateway listening on %s", server.Addr)
 		serverErrors <- server.ListenAndServe()
 	}()
 
-	select { // dive in this to understand
+	select {
 	case err := <-serverErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("serve: %v", err)

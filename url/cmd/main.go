@@ -34,7 +34,6 @@ const shutdownTimeout = 10 * time.Second
 const collectionName = "links"
 
 func main() {
-	// why we not passing ctx to handler/service?
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)

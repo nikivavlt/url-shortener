@@ -11,16 +11,17 @@ import (
 
 const defaultTimeout = 5 * time.Second
 
-// UserClient applies a bounded deadline to calls made by the HTTP gateway.
-// It forwards gRPC status errors unchanged so handlers can map them to HTTP.
 type UserClient struct {
 	api     userv1.UserServiceClient
 	conn    *grpc.ClientConn
 	timeout time.Duration
 }
 
-func DialUser(ctx context.Context, address string) (*UserClient, error) {
-	conn, err := grpc.DialContext(ctx, address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func DialUser(address string) (*UserClient, error) {
+	conn, err := grpc.NewClient(
+		address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		return nil, err
 	}

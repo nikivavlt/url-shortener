@@ -52,8 +52,9 @@ func (h *Handler) Router(auth func(http.Handler) http.Handler) http.Handler {
 	r.Post("/api/v1/auth/login", h.login)
 	r.Post("/api/v1/auth/refresh", h.refresh)
 	r.Get("/{code}", h.redirect)
-	r.Group(func(r chi.Router) { // group?
+	r.Group(func(r chi.Router) {
 		r.Use(auth)
+
 		r.Post("/api/v1/auth/logout", h.logout)
 		r.Post("/api/v1/urls", h.createURL)
 		r.Get("/api/v1/urls", h.listURLs)
