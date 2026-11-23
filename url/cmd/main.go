@@ -31,7 +31,8 @@ import (
 
 const shutdownTimeout = 10 * time.Second
 
-const collectionName = "links"
+const linkCollectionName = "links"
+const quotaCollectionName = "user_quotas"
 
 func main() {
 	cfg, err := config.Load()
@@ -58,7 +59,7 @@ func main() {
 	}
 
 	db := mongoClient.Database(cfg.MongoDB)
-	if err := initDB(ctx, db, collectionName); err != nil {
+	if err := initDB(ctx, db, linkCollectionName, quotaCollectionName); err != nil {
 		log.Fatalf("migrations: %v", err)
 	}
 
@@ -89,11 +90,11 @@ func main() {
 	defer userConn.Close()
 
 	// Dependencies
-	repo := repository.New(db.Collection(collectionName))
-	cache := cache.New(rdb)
+	repo := repository.New(db.Collection(linkCollectionName), db.Collection(quotaCollectionName))
+	redisCache := cache.New(rdb)
 	users := client.New(userv1.NewUserServiceClient(userConn))
 	clickBroker := broker.New(writer)
-	svc := service.New(repo, cache, users, clickBroker, cfg.ShortURLBase)
+	svc := service.New(repo, redisCache, users, clickBroker, cfg.ShortURLBase)
 	h := handler.New(svc)
 
 	// gRPC

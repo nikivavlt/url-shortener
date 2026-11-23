@@ -28,6 +28,12 @@ type Repository interface {
 	DeleteByOwner(ctx context.Context, shortCode, userID string) (bool, error)
 	CountActive(ctx context.Context, userID string, now time.Time) (int64, error)
 	ListByUser(ctx context.Context, userID, afterID string, limit int) ([]*domain.Link, error)
+
+	QuotaExists(ctx context.Context, userID string) (bool, error)
+	SeedQuota(ctx context.Context, userID string, used int64) error
+	ReserveQuota(ctx context.Context, userID string, limit int64) error
+	ReleaseQuota(ctx context.Context, userID string) error
+	LowerQuotaTo(ctx context.Context, userID string, actual int64) error
 }
 
 type Cache interface {
@@ -37,11 +43,6 @@ type Cache interface {
 
 	GetLimit(ctx context.Context, userID string) (int64, error)
 	SetLimit(ctx context.Context, userID string, limit int64, ttl time.Duration) error
-
-	GetCounter(ctx context.Context, userID string) (int64, error)
-	SetCounter(ctx context.Context, userID string, value int64) error
-	IncrCounter(ctx context.Context, userID string) (int64, error)
-	DecrCounter(ctx context.Context, userID string) (int64, error)
 }
 
 type UserClient interface {
@@ -88,18 +89,8 @@ func (s *URLService) CreateShortURL(ctx context.Context, in domain.CreateInput) 
 		return domain.CreateOutput{}, err
 	}
 
-	if err := s.ensureCounter(ctx, in.UserID); err != nil {
-		return domain.CreateOutput{}, fmt.Errorf("ensure counter: %w", err)
-	}
-
-	// Reserve
-	used, err := s.cache.IncrCounter(ctx, in.UserID)
-	if err != nil {
-		return domain.CreateOutput{}, fmt.Errorf("incr counter: %w", err)
-	}
-	if used > limit {
-		s.compensate(ctx, in.UserID)
-		return domain.CreateOutput{}, fmt.Errorf("%w: %d of %d used", domain.ErrLimitExceeded, used-1, limit)
+	if err := s.reserveQuota(ctx, in.UserID, limit); err != nil {
+		return domain.CreateOutput{}, err
 	}
 
 	// Persist
@@ -169,11 +160,12 @@ func (s *URLService) DeleteURL(ctx context.Context, shortCode, userID string) er
 	if err := s.cache.DelLink(cleanupCtx, shortCode); err != nil {
 		s.log.Error("stale redirect cache after delete", "short_code", shortCode, "err", err)
 	}
-	if link.IsActive {
-		if _, err := s.cache.DecrCounter(cleanupCtx, userID); err != nil {
-			s.log.Error("decr counter after delete", "user_id", userID, "err", err)
+	if link.Available(s.now()) {
+		if err := s.repo.ReleaseQuota(cleanupCtx, userID); err != nil {
+			s.log.Error("release quota after delete", "user_id", userID, "err", err)
 		}
 	}
+
 	return nil
 }
 
@@ -291,22 +283,44 @@ func (s *URLService) linksLimit(ctx context.Context, userID string) (int64, erro
 	return limit, nil
 }
 
-func (s *URLService) ensureCounter(ctx context.Context, userID string) error {
-	_, err := s.cache.GetCounter(ctx, userID)
-	if err == nil {
-		return nil
+func (s *URLService) reserveQuota(ctx context.Context, userID string, limit int64) error {
+	if err := s.ensureQuota(ctx, userID); err != nil {
+		return fmt.Errorf("ensure quota: %w", err)
 	}
 
-	if !errors.Is(err, domain.ErrCacheMiss) {
+	err := s.repo.ReserveQuota(ctx, userID, limit)
+	if !errors.Is(err, domain.ErrLimitExceeded) {
 		return err
 	}
 
+	// Limit hit: expired links may still be counted. Recount once, lower
+	// the counter if it is stale, and retry a single time.
+	active, cErr := s.repo.CountActive(ctx, userID, s.now())
+	if cErr != nil {
+		return fmt.Errorf("count active links: %w", cErr)
+	}
+	if lErr := s.repo.LowerQuotaTo(ctx, userID, active); lErr != nil {
+		return lErr
+	}
+	if err := s.repo.ReserveQuota(ctx, userID, limit); err != nil {
+		if errors.Is(err, domain.ErrLimitExceeded) {
+			return fmt.Errorf("%w: %d of %d used", domain.ErrLimitExceeded, active, limit)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *URLService) ensureQuota(ctx context.Context, userID string) error {
+	ok, err := s.repo.QuotaExists(ctx, userID)
+	if err != nil || ok {
+		return err
+	}
 	count, err := s.repo.CountActive(ctx, userID, s.now())
 	if err != nil {
 		return fmt.Errorf("count active links: %w", err)
 	}
-
-	return s.cache.SetCounter(ctx, userID, count)
+	return s.repo.SeedQuota(ctx, userID, count)
 }
 
 func (s *URLService) insertWithRetry(ctx context.Context, link *domain.Link) error {
@@ -326,9 +340,8 @@ func (s *URLService) compensate(ctx context.Context, userID string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), compensationTimeout)
 	defer cancel()
 
-	if _, err := s.cache.DecrCounter(ctx, userID); err != nil {
-		s.log.Error("counter compensation failed",
-			"user_id", userID, "err", err)
+	if err := s.repo.ReleaseQuota(ctx, userID); err != nil {
+		s.log.Error("quota compensation failed", "user_id", userID, "err", err)
 	}
 }
 
