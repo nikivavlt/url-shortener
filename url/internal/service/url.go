@@ -203,15 +203,15 @@ func (s *URLService) Redirect(ctx context.Context, in domain.RedirectInput) (str
 	link, err := s.cache.GetLink(ctx, in.ShortCode)
 	switch {
 	case err == nil:
-		s.publishClickAsync(ctx, s.clickEvent(link, in))
-		return link.OriginalURL, nil
+		// Cache hit - continue
 	case !errors.Is(err, domain.ErrCacheMiss):
 		s.log.Warn("redirect cache read failed", "short_code", in.ShortCode, "err", err)
-	}
-
-	link, err = s.repo.FindByShortCode(ctx, in.ShortCode)
-	if err != nil {
-		return "", err
+		fallthrough
+	default:
+		link, err = s.repo.FindByShortCode(ctx, in.ShortCode)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	now := s.now()
