@@ -5,14 +5,17 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	KafkaBrokers          string
-	ClickhouseAddr        string
-	ClickhouseDb          string
+	KafkaBrokers          []string
+	ClickHouseAddr        string
+	ClickHouseDB          string
+	ClickHouseUsername    string
+	ClickHousePassword    string
 	UrlServiceAddr        string
 	AnalyticsServicerPort string
 }
@@ -32,9 +35,11 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		KafkaBrokers:          get("KAFKA_BROKERS"),
-		ClickhouseAddr:        get("CLICKHOUSE_ADDR"),
-		ClickhouseDb:          get("CLICKHOUSE_DB"),
+		KafkaBrokers:          splitBrokers(get("KAFKA_BROKERS")),
+		ClickHouseAddr:        get("CLICKHOUSE_ADDR"),
+		ClickHouseDB:          get("CLICKHOUSE_DB"),
+		ClickHouseUsername:    get("CLICKHOUSE_USERNAME"),
+		ClickHousePassword:    get("CLICKHOUSE_PASSWORD"),
 		UrlServiceAddr:        get("URL_SERVICE_ADDR"),
 		AnalyticsServicerPort: get("ANALYTICS_SERVICE_PORT"),
 	}
@@ -44,4 +49,12 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func splitBrokers(value string) []string {
+	brokers := strings.Split(value, ",")
+	for i := range brokers {
+		brokers[i] = strings.TrimSpace(brokers[i])
+	}
+	return brokers
 }
