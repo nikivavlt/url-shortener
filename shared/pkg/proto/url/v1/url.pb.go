@@ -532,6 +532,9 @@ func (x *ListUserURLsResponse) GetNextCursor() string {
 type RedirectRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ShortCode     string                 `protobuf:"bytes,1,opt,name=short_code,json=shortCode,proto3" json:"short_code,omitempty"`
+	Ip            string                 `protobuf:"bytes,2,opt,name=ip,proto3" json:"ip,omitempty"`
+	UserAgent     string                 `protobuf:"bytes,3,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
+	Referer       string                 `protobuf:"bytes,4,opt,name=referer,proto3" json:"referer,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -569,6 +572,27 @@ func (*RedirectRequest) Descriptor() ([]byte, []int) {
 func (x *RedirectRequest) GetShortCode() string {
 	if x != nil {
 		return x.ShortCode
+	}
+	return ""
+}
+
+func (x *RedirectRequest) GetIp() string {
+	if x != nil {
+		return x.Ip
+	}
+	return ""
+}
+
+func (x *RedirectRequest) GetUserAgent() string {
+	if x != nil {
+		return x.UserAgent
+	}
+	return ""
+}
+
+func (x *RedirectRequest) GetReferer() string {
+	if x != nil {
+		return x.Referer
 	}
 	return ""
 }
@@ -664,10 +688,14 @@ const file_url_v1_url_proto_rawDesc = "" +
 	"\x14ListUserURLsResponse\x12#\n" +
 	"\x04urls\x18\x01 \x03(\v2\x0f.url.v1.URLItemR\x04urls\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
-	"nextCursor\"0\n" +
+	"nextCursor\"y\n" +
 	"\x0fRedirectRequest\x12\x1d\n" +
 	"\n" +
-	"short_code\x18\x01 \x01(\tR\tshortCode\"5\n" +
+	"short_code\x18\x01 \x01(\tR\tshortCode\x12\x0e\n" +
+	"\x02ip\x18\x02 \x01(\tR\x02ip\x12\x1d\n" +
+	"\n" +
+	"user_agent\x18\x03 \x01(\tR\tuserAgent\x12\x18\n" +
+	"\areferer\x18\x04 \x01(\tR\areferer\"5\n" +
 	"\x10RedirectResponse\x12!\n" +
 	"\foriginal_url\x18\x01 \x01(\tR\voriginalUrl2\xe2\x02\n" +
 	"\n" +

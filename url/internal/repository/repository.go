@@ -25,18 +25,19 @@ type linkDoc struct {
 }
 
 type URLRepository struct {
-	coll *mongo.Collection
+	links  *mongo.Collection
+	quotas *mongo.Collection
 }
 
-func New(coll *mongo.Collection) *URLRepository {
-	return &URLRepository{coll: coll}
+func New(links, quotas *mongo.Collection) *URLRepository {
+	return &URLRepository{links: links, quotas: quotas}
 }
 
 func (r *URLRepository) Insert(ctx context.Context, link *domain.Link) error {
 	doc := toDoc(link)
 	doc.ID = bson.NewObjectID()
 
-	if _, err := r.coll.InsertOne(ctx, doc); err != nil {
+	if _, err := r.links.InsertOne(ctx, doc); err != nil {
 		if mongo.IsDuplicateKeyError(err) {
 			return domain.ErrShortCodeTaken
 		}
@@ -49,7 +50,7 @@ func (r *URLRepository) Insert(ctx context.Context, link *domain.Link) error {
 
 func (r *URLRepository) FindByShortCode(ctx context.Context, shortCode string) (*domain.Link, error) {
 	var doc linkDoc
-	err := r.coll.FindOne(ctx, bson.D{{Key: "short_code", Value: shortCode}}).Decode(&doc)
+	err := r.links.FindOne(ctx, bson.D{{Key: "short_code", Value: shortCode}}).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, domain.ErrLinkNotFound
 	}
@@ -60,7 +61,7 @@ func (r *URLRepository) FindByShortCode(ctx context.Context, shortCode string) (
 }
 
 func (r *URLRepository) DeleteByOwner(ctx context.Context, shortCode, userID string) (bool, error) {
-	res, err := r.coll.DeleteOne(ctx, bson.D{
+	res, err := r.links.DeleteOne(ctx, bson.D{
 		{Key: "short_code", Value: shortCode},
 		{Key: "user_id", Value: userID},
 	})
@@ -71,7 +72,7 @@ func (r *URLRepository) DeleteByOwner(ctx context.Context, shortCode, userID str
 }
 
 func (r *URLRepository) CountActive(ctx context.Context, userID string, now time.Time) (int64, error) {
-	n, err := r.coll.CountDocuments(ctx, bson.D{
+	n, err := r.links.CountDocuments(ctx, bson.D{
 		{Key: "user_id", Value: userID},
 		{Key: "is_active", Value: true},
 		{Key: "$or", Value: bson.A{
@@ -99,7 +100,7 @@ func (r *URLRepository) ListByUser(ctx context.Context, userID, afterID string, 
 		SetSort(bson.D{{Key: "_id", Value: 1}}).
 		SetLimit(int64(limit))
 
-	cur, err := r.coll.Find(ctx, filter, opts)
+	cur, err := r.links.Find(ctx, filter, opts)
 	if err != nil {
 		return nil, fmt.Errorf("list links: %w", err)
 	}
@@ -139,4 +140,83 @@ func fromDoc(d linkDoc) *domain.Link {
 		ExpiresAt:   d.ExpiresAt,
 		IsActive:    d.IsActive,
 	}
+}
+
+func (r *URLRepository) QuotaExists(ctx context.Context, userID string) (bool, error) {
+	err := r.quotas.FindOne(ctx, bson.D{{Key: "_id", Value: userID}},
+		options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}})).Err()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("find quota: %w", err)
+	}
+	return true, nil
+}
+
+func (r *URLRepository) SeedQuota(ctx context.Context, userID string, used int64) error {
+	_, err := r.quotas.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: userID}},
+		bson.D{{Key: "$setOnInsert", Value: bson.D{
+			{Key: "used", Value: used},
+			{Key: "updated_at", Value: time.Now().UTC()},
+		}}},
+		options.UpdateOne().SetUpsert(true),
+	)
+	if err != nil && !mongo.IsDuplicateKeyError(err) {
+		return fmt.Errorf("seed quota: %w", err)
+	}
+	return nil
+}
+
+func (r *URLRepository) ReserveQuota(ctx context.Context, userID string, limit int64) error {
+	if limit <= 0 {
+		return domain.ErrLimitExceeded
+	}
+	_, err := r.quotas.UpdateOne(ctx,
+		bson.D{
+			{Key: "_id", Value: userID},
+			{Key: "used", Value: bson.D{{Key: "$lt", Value: limit}}},
+		},
+		bson.D{
+			{Key: "$inc", Value: bson.D{{Key: "used", Value: 1}}},
+			{Key: "$set", Value: bson.D{{Key: "updated_at", Value: time.Now().UTC()}}},
+		},
+		options.UpdateOne().SetUpsert(true),
+	)
+	if mongo.IsDuplicateKeyError(err) {
+		return domain.ErrLimitExceeded
+	}
+	if err != nil {
+		return fmt.Errorf("reserve quota: %w", err)
+	}
+	return nil
+}
+
+func (r *URLRepository) ReleaseQuota(ctx context.Context, userID string) error {
+	_, err := r.quotas.UpdateOne(ctx,
+		bson.D{
+			{Key: "_id", Value: userID},
+			{Key: "used", Value: bson.D{{Key: "$gt", Value: 0}}},
+		},
+		bson.D{
+			{Key: "$inc", Value: bson.D{{Key: "used", Value: -1}}},
+			{Key: "$set", Value: bson.D{{Key: "updated_at", Value: time.Now().UTC()}}},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("release quota: %w", err)
+	}
+	return nil
+}
+
+func (r *URLRepository) LowerQuotaTo(ctx context.Context, userID string, actual int64) error {
+	_, err := r.quotas.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: userID}},
+		bson.D{{Key: "$min", Value: bson.D{{Key: "used", Value: actual}}}},
+	)
+	if err != nil {
+		return fmt.Errorf("reconcile quota: %w", err)
+	}
+	return nil
 }
