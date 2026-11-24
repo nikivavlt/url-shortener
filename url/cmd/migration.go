@@ -3,13 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-func initDB(ctx context.Context, db *mongo.Database, collectionName string) error {
+func initDB(ctx context.Context, db *mongo.Database, collectionName string, quotaCollectionName string) error {
 	validator := bson.M{
 		"$jsonSchema": bson.M{
 			"bsonType": "object",
@@ -61,6 +62,17 @@ func initDB(ctx context.Context, db *mongo.Database, collectionName string) erro
 			Options: options.Index().SetExpireAfterSeconds(0),
 		},
 	})
+	if err != nil {
+		return fmt.Errorf("create indexes: %w", err)
+	}
 
-	return err
+	err = db.CreateCollection(ctx, quotaCollectionName)
+	if err != nil {
+		var cmdErr mongo.CommandError
+		if !errors.As(err, &cmdErr) || cmdErr.Code != 48 { // NamespaceExists
+			return fmt.Errorf("create quota collection: %w", err)
+		}
+	}
+
+	return nil
 }

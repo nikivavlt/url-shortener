@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -17,6 +18,7 @@ type Config struct {
 	UserServiceAddr string
 	GRPCPort        string
 	ShortURLBase    string
+	KafkaBrokers    []string
 }
 
 func Load() (*Config, error) {
@@ -39,6 +41,7 @@ func Load() (*Config, error) {
 		UserServiceAddr: get("USER_SERVICE_ADDR"),
 		GRPCPort:        get("URL_SERVICE_PORT"),
 		ShortURLBase:    get("SHORT_URL_BASE"),
+		KafkaBrokers:    splitBrokers(get("KAFKA_BROKERS")),
 	}
 	redisHost, redisPort := get("REDIS_HOST"), get("REDIS_PORT")
 
@@ -48,4 +51,12 @@ func Load() (*Config, error) {
 
 	cfg.RedisAddr = net.JoinHostPort(redisHost, redisPort)
 	return cfg, nil
+}
+
+func splitBrokers(value string) []string {
+	brokers := strings.Split(value, ",")
+	for i := range brokers {
+		brokers[i] = strings.TrimSpace(brokers[i])
+	}
+	return brokers
 }

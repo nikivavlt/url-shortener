@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/segmentio/kafka-go"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"google.golang.org/grpc"
@@ -19,6 +20,7 @@ import (
 	urlv1 "github.com/nikivavlt/url-shortener/shared/pkg/proto/url/v1"
 	userv1 "github.com/nikivavlt/url-shortener/shared/pkg/proto/user/v1"
 
+	"github.com/nikivavlt/url-shortener/url/internal/broker"
 	"github.com/nikivavlt/url-shortener/url/internal/cache"
 	"github.com/nikivavlt/url-shortener/url/internal/client"
 	"github.com/nikivavlt/url-shortener/url/internal/config"
@@ -29,7 +31,8 @@ import (
 
 const shutdownTimeout = 10 * time.Second
 
-const collectionName = "links"
+const linkCollectionName = "links"
+const quotaCollectionName = "user_quotas"
 
 func main() {
 	cfg, err := config.Load()
@@ -56,7 +59,7 @@ func main() {
 	}
 
 	db := mongoClient.Database(cfg.MongoDB)
-	if err := initDB(ctx, db, collectionName); err != nil {
+	if err := initDB(ctx, db, linkCollectionName, quotaCollectionName); err != nil {
 		log.Fatalf("migrations: %v", err)
 	}
 
@@ -67,6 +70,14 @@ func main() {
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Fatalf("redis ping: %v", err)
 	}
+
+	// Kafka
+	writer := &kafka.Writer{
+		Addr:                   kafka.TCP(cfg.KafkaBrokers...),
+		Topic:                  "click_events",
+		AllowAutoTopicCreation: true,
+	}
+	defer writer.Close()
 
 	// User service
 	userConn, err := grpc.NewClient(
@@ -79,10 +90,11 @@ func main() {
 	defer userConn.Close()
 
 	// Dependencies
-	repo := repository.New(db.Collection(collectionName))
-	cache := cache.New(rdb)
+	repo := repository.New(db.Collection(linkCollectionName), db.Collection(quotaCollectionName))
+	redisCache := cache.New(rdb)
 	users := client.New(userv1.NewUserServiceClient(userConn))
-	svc := service.New(repo, cache, users, cfg.ShortURLBase)
+	clickBroker := broker.New(writer)
+	svc := service.New(repo, redisCache, users, clickBroker, cfg.ShortURLBase)
 	h := handler.New(svc)
 
 	// gRPC

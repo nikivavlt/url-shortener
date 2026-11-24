@@ -1,6 +1,8 @@
 go 1.27.1
 
 use (
+	./gateway
+	./integration
 	./shared
 	./url
 	./user

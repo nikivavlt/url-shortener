@@ -16,20 +16,22 @@ import (
 var fixedNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
 type deps struct {
-	repo  *mocks.MockRepository
-	cache *mocks.MockCache
-	users *mocks.MockUserClient
-	svc   *URLService
+	repo   *mocks.MockRepository
+	cache  *mocks.MockCache
+	users  *mocks.MockUserClient
+	broker *mocks.MockBroker
+	svc    *URLService
 }
 
 func newDeps(t *testing.T) deps {
 	t.Helper()
 	d := deps{
-		repo:  mocks.NewMockRepository(t),
-		cache: mocks.NewMockCache(t),
-		users: mocks.NewMockUserClient(t),
+		repo:   mocks.NewMockRepository(t),
+		cache:  mocks.NewMockCache(t),
+		users:  mocks.NewMockUserClient(t),
+		broker: mocks.NewMockBroker(t),
 	}
-	d.svc = New(d.repo, d.cache, d.users, "https://short.url/")
+	d.svc = New(d.repo, d.cache, d.users, d.broker, "https://short.url/")
 	d.svc.now = func() time.Time { return fixedNow }
 	return d
 }
@@ -51,10 +53,10 @@ func TestCreateShortURL_Success(t *testing.T) {
 	d.cache.EXPECT().GetLimit(mock.Anything, "u1").Return(0, domain.ErrCacheMiss).Once()
 	d.users.EXPECT().GetLimit(mock.Anything, "u1").Return(10, nil).Once()
 	d.cache.EXPECT().SetLimit(mock.Anything, "u1", int64(10), limitCacheTTL).Return(nil).Once()
-	d.cache.EXPECT().GetCounter(mock.Anything, "u1").Return(0, domain.ErrCacheMiss).Once()
+	d.repo.EXPECT().QuotaExists(mock.Anything, "u1").Return(false, nil).Once()
 	d.repo.EXPECT().CountActive(mock.Anything, "u1", fixedNow).Return(2, nil).Once()
-	d.cache.EXPECT().SetCounter(mock.Anything, "u1", int64(2)).Return(nil).Once()
-	d.cache.EXPECT().IncrCounter(mock.Anything, "u1").Return(3, nil).Once()
+	d.repo.EXPECT().SeedQuota(mock.Anything, "u1", int64(2)).Return(nil).Once()
+	d.repo.EXPECT().ReserveQuota(mock.Anything, "u1", int64(10)).Return(nil).Once()
 	d.repo.EXPECT().Insert(mock.Anything, mock.MatchedBy(func(l *domain.Link) bool {
 		return l.ShortCode == "abc1234" && l.UserID == "u1" && l.IsActive &&
 			l.ExpiresAt == nil && l.CreatedAt.Equal(fixedNow) && l.UpdatedAt.Equal(fixedNow)
@@ -66,29 +68,65 @@ func TestCreateShortURL_Success(t *testing.T) {
 	assert.Equal(t, domain.CreateOutput{ShortCode: "abc1234", ShortURL: "https://short.url/abc1234"}, out)
 }
 
-func TestCreateShortURL_LimitExceeded_CounterRolledBack(t *testing.T) {
+// Counter is really full: reserve fails, recount confirms, retry fails.
+// No ReleaseQuota: nothing was reserved.
+func TestCreateShortURL_LimitExceeded(t *testing.T) {
 	d := newDeps(t)
 
 	d.cache.EXPECT().GetLimit(mock.Anything, "u1").Return(3, nil).Once()
-	d.cache.EXPECT().GetCounter(mock.Anything, "u1").Return(3, nil).Once()
-	d.cache.EXPECT().IncrCounter(mock.Anything, "u1").Return(4, nil).Once()
-	d.cache.EXPECT().DecrCounter(mock.Anything, "u1").Return(3, nil).Once()
+	d.repo.EXPECT().QuotaExists(mock.Anything, "u1").Return(true, nil).Once()
+	d.repo.EXPECT().ReserveQuota(mock.Anything, "u1", int64(3)).Return(domain.ErrLimitExceeded).Twice()
+	d.repo.EXPECT().CountActive(mock.Anything, "u1", fixedNow).Return(3, nil).Once()
+	d.repo.EXPECT().LowerQuotaTo(mock.Anything, "u1", int64(3)).Return(nil).Once()
 
 	_, err := d.svc.CreateShortURL(context.Background(), validInput())
 
 	require.ErrorIs(t, err, domain.ErrLimitExceeded)
 }
 
-func TestCreateShortURL_InsertFails_CounterRolledBack(t *testing.T) {
+// Counter is stale (expired links were TTL-deleted): reconcile frees a slot.
+func TestCreateShortURL_StaleCounter_Reconciled(t *testing.T) {
+	d := newDeps(t)
+	d.svc.newCode = codes("abc1234")
+
+	d.cache.EXPECT().GetLimit(mock.Anything, "u1").Return(3, nil).Once()
+	d.repo.EXPECT().QuotaExists(mock.Anything, "u1").Return(true, nil).Once()
+	d.repo.EXPECT().ReserveQuota(mock.Anything, "u1", int64(3)).Return(domain.ErrLimitExceeded).Once()
+	d.repo.EXPECT().CountActive(mock.Anything, "u1", fixedNow).Return(1, nil).Once()
+	d.repo.EXPECT().LowerQuotaTo(mock.Anything, "u1", int64(1)).Return(nil).Once()
+	d.repo.EXPECT().ReserveQuota(mock.Anything, "u1", int64(3)).Return(nil).Once()
+	d.repo.EXPECT().Insert(mock.Anything, mock.Anything).Return(nil).Once()
+
+	out, err := d.svc.CreateShortURL(context.Background(), validInput())
+
+	require.NoError(t, err)
+	assert.Equal(t, "abc1234", out.ShortCode)
+}
+
+// A non-limit error from reserve is returned as is: no recount, no release.
+func TestCreateShortURL_ReserveFails(t *testing.T) {
+	d := newDeps(t)
+	dbErr := errors.New("mongo down")
+
+	d.cache.EXPECT().GetLimit(mock.Anything, "u1").Return(10, nil).Once()
+	d.repo.EXPECT().QuotaExists(mock.Anything, "u1").Return(true, nil).Once()
+	d.repo.EXPECT().ReserveQuota(mock.Anything, "u1", int64(10)).Return(dbErr).Once()
+
+	_, err := d.svc.CreateShortURL(context.Background(), validInput())
+
+	require.ErrorIs(t, err, dbErr)
+}
+
+func TestCreateShortURL_InsertFails_QuotaReleased(t *testing.T) {
 	d := newDeps(t)
 	d.svc.newCode = codes("abc1234")
 	dbErr := errors.New("mongo down")
 
 	d.cache.EXPECT().GetLimit(mock.Anything, "u1").Return(10, nil).Once()
-	d.cache.EXPECT().GetCounter(mock.Anything, "u1").Return(4, nil).Once()
-	d.cache.EXPECT().IncrCounter(mock.Anything, "u1").Return(5, nil).Once()
+	d.repo.EXPECT().QuotaExists(mock.Anything, "u1").Return(true, nil).Once()
+	d.repo.EXPECT().ReserveQuota(mock.Anything, "u1", int64(10)).Return(nil).Once()
 	d.repo.EXPECT().Insert(mock.Anything, mock.Anything).Return(dbErr).Once()
-	d.cache.EXPECT().DecrCounter(mock.Anything, "u1").Return(4, nil).Once()
+	d.repo.EXPECT().ReleaseQuota(mock.Anything, "u1").Return(nil).Once()
 
 	_, err := d.svc.CreateShortURL(context.Background(), validInput())
 
@@ -101,15 +139,15 @@ func TestCreateShortURL_CompensationSurvivesCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	d.cache.EXPECT().GetLimit(mock.Anything, "u1").Return(10, nil).Once()
-	d.cache.EXPECT().GetCounter(mock.Anything, "u1").Return(4, nil).Once()
-	d.cache.EXPECT().IncrCounter(mock.Anything, "u1").Return(5, nil).Once()
+	d.repo.EXPECT().QuotaExists(mock.Anything, "u1").Return(true, nil).Once()
+	d.repo.EXPECT().ReserveQuota(mock.Anything, "u1", int64(10)).Return(nil).Once()
 	d.repo.EXPECT().Insert(mock.Anything, mock.Anything).
 		RunAndReturn(func(context.Context, *domain.Link) error { cancel(); return context.Canceled }).Once()
-	d.cache.EXPECT().DecrCounter(mock.Anything, "u1").
+	d.repo.EXPECT().ReleaseQuota(mock.Anything, "u1").
 		Run(func(c context.Context, _ string) {
 			assert.NoError(t, c.Err(), "compensation ctx must be live")
 		}).
-		Return(4, nil).Once()
+		Return(nil).Once()
 
 	_, err := d.svc.CreateShortURL(ctx, validInput())
 
@@ -121,8 +159,8 @@ func TestCreateShortURL_RetriesOnCollision(t *testing.T) {
 	d.svc.newCode = codes("dup0001", "dup0002", "ok00003")
 
 	d.cache.EXPECT().GetLimit(mock.Anything, "u1").Return(10, nil).Once()
-	d.cache.EXPECT().GetCounter(mock.Anything, "u1").Return(0, nil).Once()
-	d.cache.EXPECT().IncrCounter(mock.Anything, "u1").Return(1, nil).Once()
+	d.repo.EXPECT().QuotaExists(mock.Anything, "u1").Return(true, nil).Once()
+	d.repo.EXPECT().ReserveQuota(mock.Anything, "u1", int64(10)).Return(nil).Once()
 	d.repo.EXPECT().Insert(mock.Anything, mock.Anything).Return(domain.ErrShortCodeTaken).Twice()
 	d.repo.EXPECT().Insert(mock.Anything, mock.Anything).Return(nil).Once()
 
@@ -176,7 +214,30 @@ func TestDeleteURL_Success(t *testing.T) {
 		Return(&domain.Link{ShortCode: "abc1234", UserID: "u1", IsActive: true}, nil).Once()
 	d.repo.EXPECT().DeleteByOwner(mock.Anything, "abc1234", "u1").Return(true, nil).Once()
 	d.cache.EXPECT().DelLink(mock.Anything, "abc1234").Return(nil).Once()
-	d.cache.EXPECT().DecrCounter(mock.Anything, "u1").Return(2, nil).Once()
+	d.repo.EXPECT().ReleaseQuota(mock.Anything, "u1").Return(nil).Once()
+
+	require.NoError(t, d.svc.DeleteURL(context.Background(), "abc1234", "u1"))
+}
+
+// An expired link no longer counts toward quota, so deleting it must not
+// release a slot (no ReleaseQuota expectation: an unexpected call fails).
+func TestDeleteURL_Expired_DoesNotReleaseQuota(t *testing.T) {
+	d := newDeps(t)
+	exp := fixedNow.Add(-time.Minute)
+	d.repo.EXPECT().FindByShortCode(mock.Anything, "abc1234").
+		Return(&domain.Link{ShortCode: "abc1234", UserID: "u1", IsActive: true, ExpiresAt: &exp}, nil).Once()
+	d.repo.EXPECT().DeleteByOwner(mock.Anything, "abc1234", "u1").Return(true, nil).Once()
+	d.cache.EXPECT().DelLink(mock.Anything, "abc1234").Return(nil).Once()
+
+	require.NoError(t, d.svc.DeleteURL(context.Background(), "abc1234", "u1"))
+}
+
+func TestDeleteURL_Inactive_DoesNotReleaseQuota(t *testing.T) {
+	d := newDeps(t)
+	d.repo.EXPECT().FindByShortCode(mock.Anything, "abc1234").
+		Return(&domain.Link{ShortCode: "abc1234", UserID: "u1", IsActive: false}, nil).Once()
+	d.repo.EXPECT().DeleteByOwner(mock.Anything, "abc1234", "u1").Return(true, nil).Once()
+	d.cache.EXPECT().DelLink(mock.Anything, "abc1234").Return(nil).Once()
 
 	require.NoError(t, d.svc.DeleteURL(context.Background(), "abc1234", "u1"))
 }
@@ -184,29 +245,66 @@ func TestDeleteURL_Success(t *testing.T) {
 func TestRedirect_CacheMiss_WarmsCacheWithExpiryTTL(t *testing.T) {
 	d := newDeps(t)
 	exp := fixedNow.Add(time.Hour)
+	input := domain.RedirectInput{ShortCode: "abc1234", IP: "127.0.0.1", UserAgent: "grpcurl", Referer: "https://example.test"}
+	published := make(chan struct{})
 
-	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").Return("", domain.ErrCacheMiss).Once()
+	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").Return(nil, domain.ErrCacheMiss).Once()
 	d.repo.EXPECT().FindByShortCode(mock.Anything, "abc1234").
-		Return(&domain.Link{OriginalURL: "https://example.com", IsActive: true, ExpiresAt: &exp}, nil).Once()
-	d.cache.EXPECT().SetLink(mock.Anything, "abc1234", "https://example.com", time.Hour).Return(nil).Once()
+		Return(&domain.Link{ShortCode: "abc1234", OriginalURL: "https://example.com", UserID: "u1", IsActive: true, ExpiresAt: &exp}, nil).Once()
+	d.cache.EXPECT().SetLink(mock.Anything, "abc1234", mock.MatchedBy(func(link *domain.Link) bool {
+		return link.OriginalURL == "https://example.com" && link.UserID == "u1"
+	}), time.Hour).Return(nil).Once()
+	d.broker.EXPECT().WriteMessages(mock.Anything, domain.BrokerMessage{
+		ShortCode: "abc1234", UserID: "u1", ClickedAt: fixedNow,
+		IP: "127.0.0.1", UserAgent: "grpcurl", Referer: "https://example.test",
+	}).Run(func(context.Context, domain.BrokerMessage) { close(published) }).Return(nil).Once()
 
-	got, err := d.svc.Redirect(context.Background(), "abc1234")
+	got, err := d.svc.Redirect(context.Background(), input)
 
 	require.NoError(t, err)
 	assert.Equal(t, "https://example.com", got)
+	awaitPublish(t, published)
+}
+
+func TestRedirect_CacheHit_PublishesClick(t *testing.T) {
+	d := newDeps(t)
+	published := make(chan struct{})
+	input := domain.RedirectInput{ShortCode: "abc1234", IP: "127.0.0.1", UserAgent: "grpcurl", Referer: "https://example.test"}
+
+	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").
+		Return(&domain.Link{ShortCode: "abc1234", OriginalURL: "https://example.com", UserID: "u1"}, nil).Once()
+	d.broker.EXPECT().WriteMessages(mock.Anything, domain.BrokerMessage{
+		ShortCode: "abc1234", UserID: "u1", ClickedAt: fixedNow,
+		IP: "127.0.0.1", UserAgent: "grpcurl", Referer: "https://example.test",
+	}).Run(func(context.Context, domain.BrokerMessage) { close(published) }).Return(nil).Once()
+
+	got, err := d.svc.Redirect(context.Background(), input)
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.com", got)
+	awaitPublish(t, published)
 }
 
 func TestRedirect_ExpiredNotCached(t *testing.T) {
 	d := newDeps(t)
 	exp := fixedNow.Add(-time.Second)
 
-	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").Return("", domain.ErrCacheMiss).Once()
+	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").Return(nil, domain.ErrCacheMiss).Once()
 	d.repo.EXPECT().FindByShortCode(mock.Anything, "abc1234").
 		Return(&domain.Link{OriginalURL: "https://example.com", IsActive: true, ExpiresAt: &exp}, nil).Once()
 
-	_, err := d.svc.Redirect(context.Background(), "abc1234")
+	_, err := d.svc.Redirect(context.Background(), domain.RedirectInput{ShortCode: "abc1234"})
 
 	require.ErrorIs(t, err, domain.ErrLinkNotFound)
+}
+
+func awaitPublish(t *testing.T, published <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("click event was not published")
+	}
 }
 
 func TestListUserURLs_Pagination(t *testing.T) {
