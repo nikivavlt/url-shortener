@@ -19,20 +19,20 @@ type Repository interface {
 	GetAnalytics(ctx context.Context, shortCode string, days int) (*domain.Analytics, error)
 }
 
-type UrlClient interface {
+type URLClient interface {
 	GetURL(ctx context.Context, request *urlv1.GetURLRequest) (*urlv1.GetURLResponse, error)
 }
 
 type AnalyticsService struct {
 	repo   Repository
-	client UrlClient
+	client URLClient
 }
 
-func New(repo Repository, urlClient UrlClient) *AnalyticsService {
+func New(repo Repository, urlClient URLClient) *AnalyticsService {
 	return &AnalyticsService{repo: repo, client: urlClient}
 }
 
-func (s *AnalyticsService) GetAnalytics(ctx context.Context, userId, shortCode string, days int) (*domain.Analytics, error) {
+func (s *AnalyticsService) GetAnalytics(ctx context.Context, userID, shortCode string, days int) (*domain.Analytics, error) {
 	if days <= 0 {
 		days = defaultDays
 	}
@@ -49,30 +49,9 @@ func (s *AnalyticsService) GetAnalytics(ctx context.Context, userId, shortCode s
 		return nil, fmt.Errorf("get url: %w", err)
 	}
 
-	if res.GetUserId() != userId {
+	if res.GetUserId() != userID {
 		return nil, domain.ErrPermissionDenied
 	}
 
 	return s.repo.GetAnalytics(ctx, shortCode, days)
 }
-
-// func do() {
-// for {
-//     batch, err := broker.ReadMessages(ctx, 100, 5*time.Second)
-//     if err != nil {
-//         return err
-//     }
-
-//     if len(batch.Events) == 0 {
-//         continue
-//     }
-
-//     if err := clickhouseRepo.InsertBatch(ctx, batch.Events); err != nil {
-//         return err
-//     }
-
-//     if err := broker.CommitMessages(ctx, batch.Messages); err != nil {
-//         return err
-//     }
-// }
-// }

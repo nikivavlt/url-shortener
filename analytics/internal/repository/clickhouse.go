@@ -65,13 +65,13 @@ func (r *AnalyticsRepository) GetAnalytics(ctx context.Context, shortCode string
 	res := &domain.Analytics{}
 
 	if err := r.conn.QueryRow(ctx, `
-	SELECT count() FROM click_events WHERE short_code = ?`, shortCode,
+	SELECT toInt64(count()) FROM click_events WHERE short_code = ?`, shortCode,
 	).Scan(&res.TotalClicks); err != nil {
 		return nil, fmt.Errorf("query total: %w", err)
 	}
 
 	rows, err := r.conn.Query(ctx,
-		`SELECT toDate(clicked_at) AS d, count() AS c
+		`SELECT toDate(clicked_at) AS d, toInt64(count()) AS c
 		FROM click_events
 		WHERE short_code = ? AND clicked_at >= now() - INTERVAL ? DAY
 		GROUP BY d ORDER BY d DESC`, shortCode, days,
@@ -95,7 +95,7 @@ func (r *AnalyticsRepository) GetAnalytics(ctx context.Context, shortCode string
 	}
 
 	refRows, err := r.conn.Query(ctx, `
-		SELECT referer, count() AS c
+		SELECT referer, toInt64(count()) AS c
 		FROM click_events
 		WHERE short_code = ? AND clicked_at >= now() - INTERVAL ? DAY
 		GROUP BY referer ORDER BY c DESC LIMIT 10`, shortCode, days)

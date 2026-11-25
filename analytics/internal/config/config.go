@@ -11,13 +11,13 @@ import (
 )
 
 type Config struct {
-	KafkaBrokers          []string
-	ClickHouseAddr        string
-	ClickHouseDB          string
-	ClickHouseUsername    string
-	ClickHousePassword    string
-	URLServiceAddr        string
-	AnalyticsServicerPort string
+	KafkaBrokers       []string
+	ClickHouseAddr     string
+	ClickHouseDB       string
+	ClickHouseUsername string
+	ClickHousePassword string
+	URLServiceAddr     string
+	GRPCPort           string
 }
 
 func Load() (*Config, error) {
@@ -35,13 +35,13 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		KafkaBrokers:          splitBrokers(get("KAFKA_BROKERS")),
-		ClickHouseAddr:        get("CLICKHOUSE_ADDR"),
-		ClickHouseDB:          get("CLICKHOUSE_DB"),
-		ClickHouseUsername:    get("CLICKHOUSE_USERNAME"),
-		ClickHousePassword:    get("CLICKHOUSE_PASSWORD"),
-		URLServiceAddr:        get("URL_SERVICE_ADDR"),
-		AnalyticsServicerPort: get("ANALYTICS_SERVICE_PORT"),
+		KafkaBrokers:       splitBrokers(get("KAFKA_BROKERS")),
+		ClickHouseAddr:     get("CLICKHOUSE_ADDR"),
+		ClickHouseDB:       get("CLICKHOUSE_DB"),
+		ClickHouseUsername: get("CLICKHOUSE_USERNAME"),
+		ClickHousePassword: get("CLICKHOUSE_PASSWORD"),
+		URLServiceAddr:     get("URL_SERVICE_ADDR"),
+		GRPCPort:           get("ANALYTICS_SERVICE_PORT"),
 	}
 
 	if len(missing) > 0 {

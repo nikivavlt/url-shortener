@@ -45,11 +45,11 @@ func run() error {
 	defer stop()
 
 	// gRPC client
-	urlClient, err := client.DialURL(cfg.URLServiceAddr)
+	URLClient, err := client.DialURL(cfg.URLServiceAddr)
 	if err != nil {
 		return fmt.Errorf("url service client: %w", err)
 	}
-	defer urlClient.Close()
+	defer URLClient.Close()
 
 	// ClickHouse
 	conn, err := clickhouse.Open(&clickhouse.Options{
@@ -73,6 +73,11 @@ func run() error {
 		return fmt.Errorf("clickhouse ping: %w", err)
 	}
 
+	repo := repository.New(conn)
+	if err := repo.Init(initCtx); err != nil {
+		return err
+	}
+
 	// Kafka
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:  cfg.KafkaBrokers,
@@ -85,9 +90,8 @@ func run() error {
 	defer reader.Close()
 
 	// Dependencies
-	repo := repository.New(conn)
 	cons := consumer.New(reader, repo, batchSize, flushInterval)
-	svc := service.New(repo, urlClient)
+	svc := service.New(repo, URLClient)
 	h := handler.New(svc)
 
 	// gRPC server
@@ -95,10 +99,12 @@ func run() error {
 	analytics_v1.RegisterAnalyticsServiceServer(grpcServer, h)
 	reflection.Register(grpcServer)
 
-	lis, err := net.Listen("tcp", ":"+cfg.AnalyticsServicerPort)
+	lis, err := net.Listen("tcp", ":"+cfg.GRPCPort)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+
+	// think about this flow
 
 	// Run consumer
 	consumerDone := make(chan struct{})
@@ -110,7 +116,7 @@ func run() error {
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("analytics service listening on :%s", cfg.AnalyticsServicerPort)
+		log.Printf("analytics service listening on :%s", cfg.GRPCPort)
 		serverErr <- grpcServer.Serve(lis)
 	}()
 

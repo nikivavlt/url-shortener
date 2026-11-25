@@ -50,7 +50,7 @@ func toGRPCError(err error) error {
 	case errors.Is(err, domain.ErrNotFound):
 		return status.Error(codes.NotFound, "url not found")
 	case errors.Is(err, domain.ErrPermissionDenied):
-		return status.Error(codes.NotFound, "you don't own this url")
+		return status.Error(codes.PermissionDenied, "you don't own this url")
 	default:
 		log.Printf("internal error: %v", err)
 		return status.Error(codes.Internal, "internal error")
