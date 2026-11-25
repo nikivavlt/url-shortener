@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"log"
 	"net"
 	"os/signal"
@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/nikivavlt/url-shortener/analytics/internal/broker"
 	"github.com/nikivavlt/url-shortener/analytics/internal/client"
 	"github.com/nikivavlt/url-shortener/analytics/internal/config"
+	"github.com/nikivavlt/url-shortener/analytics/internal/consumer"
 	"github.com/nikivavlt/url-shortener/analytics/internal/handler"
 	"github.com/nikivavlt/url-shortener/analytics/internal/repository"
 	"github.com/nikivavlt/url-shortener/analytics/internal/service"
@@ -21,60 +21,74 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	analytics_v1 "github.com/nikivavlt/url-shortener/shared/pkg/proto/analytics/v1"
-	urlv1 "github.com/nikivavlt/url-shortener/shared/pkg/proto/url/v1"
 )
 
-const shutdownTimeout = 10 * time.Second
+const (
+	shutdownTimeout = 10 * time.Second
+	batchSize       = 100
+	flushInterval   = 5 * time.Second
+)
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		return fmt.Errorf("config: %w", err)
 	}
 
-	ctx := context.Background() // change it?
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// gRPC client
-	urlClient, err := client.DialURL(cfg.UrlServiceAddr)
+	urlClient, err := client.DialURL(cfg.URLServiceAddr)
 	if err != nil {
-		log.Fatalf("url service client: %v", err)
+		return fmt.Errorf("url service client: %w", err)
 	}
 	defer urlClient.Close()
 
-	// Kafka
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: cfg.KafkaBrokers, Topic: "click_events", GroupID: "analytics-service",
-	})
-	defer reader.Close()
-
 	// ClickHouse
-	db := clickhouse.OpenDB(&clickhouse.Options{
+	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{cfg.ClickHouseAddr},
 		Auth: clickhouse.Auth{
 			Database: cfg.ClickHouseDB,
 			Username: cfg.ClickHouseUsername,
 			Password: cfg.ClickHousePassword,
 		},
-		DialTimeout: 5 * time.Second, // change it?
+		DialTimeout: 5 * time.Second,
 	})
+	if err != nil {
+		return fmt.Errorf("clickhouse open: %w", err)
+	}
+	defer conn.Close()
 
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		log.Fatalf("clickhouse connection failed: %w", err)
+	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	if err := conn.Ping(initCtx); err != nil {
+		return fmt.Errorf("clickhouse ping: %w", err)
 	}
 
-	if err := initDB(ctx, db, "click_events"); err != nil {
-		// .....
-	}
+	// Kafka
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:  cfg.KafkaBrokers,
+		Topic:    "click_events",
+		GroupID:  "analytics-service",
+		MinBytes: 1,
+		MaxBytes: 10 << 20,
+		MaxWait:  time.Second,
+	})
+	defer reader.Close()
 
 	// Dependencies
-	repo := repository.New(db)
-	consumer := broker.New(reader)
+	repo := repository.New(conn)
+	cons := consumer.New(reader, repo, batchSize, flushInterval)
 	svc := service.New(repo, urlClient)
 	h := handler.New(svc)
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop() // move it?
 
 	// gRPC server
 	grpcServer := grpc.NewServer()
@@ -83,32 +97,55 @@ func main() {
 
 	lis, err := net.Listen("tcp", ":"+cfg.AnalyticsServicerPort)
 	if err != nil {
-		log.Fatalf("listen: %v", err)
+		return fmt.Errorf("listen: %w", err)
 	}
 
+	// Run consumer
+	consumerDone := make(chan struct{})
+	var consumerErr error
 	go func() {
-		log.Printf("analytics service listening on :%s", cfg.AnalyticsServicerPort)
-
-		if err := grpcServer.Serve(lis); err != nil &&
-			!errors.Is(err, grpc.ErrServerStopped) {
-			log.Fatalf("serve: %v", err)
-		}
+		defer close(consumerDone)
+		consumerErr = cons.Run(ctx)
 	}()
 
-	<-ctx.Done()
+	serverErr := make(chan error, 1)
+	go func() {
+		log.Printf("analytics service listening on :%s", cfg.AnalyticsServicerPort)
+		serverErr <- grpcServer.Serve(lis)
+	}()
 
-	log.Println("shutting down...")
+	var runErr error
+	select {
+	case <-ctx.Done():
+		log.Println("shutting down...")
+	case err := <-serverErr:
+		runErr = fmt.Errorf("grpc serve: %w", err)
+	case <-consumerDone:
+		if consumerErr != nil {
+			runErr = fmt.Errorf("consumer: %w", consumerErr)
+		}
+	}
 
-	done := make(chan struct{})
+	stop()
+
+	grpcDone := make(chan struct{})
 	go func() {
 		grpcServer.GracefulStop()
-		close(done)
+		close(grpcDone)
 	}()
 
 	select {
-	case <-done:
+	case <-grpcDone:
 	case <-time.After(shutdownTimeout):
 		log.Println("graceful shutdown timed out")
 		grpcServer.Stop()
 	}
+
+	select {
+	case <-consumerDone:
+	case <-time.After(shutdownTimeout):
+		log.Println("consumer did not stop in time")
+	}
+
+	return runErr
 }

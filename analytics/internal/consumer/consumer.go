@@ -1,4 +1,4 @@
-package broker
+package consumer
 
 import (
 	"context"
@@ -10,25 +10,36 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-type Broker struct {
-	consumer *kafka.Reader
+type Repository interface {
+	InsertBatch(ctx context.Context, events []domain.ClickEvent) error
 }
 
-type Batch struct {
+type Consumer struct {
+	reader        *kafka.Reader
+	repo          Repository
+	batchSize     int
+	flushInterval time.Duration
+}
+
+type batch struct {
 	Events   []domain.ClickEvent
 	Messages []kafka.Message
 }
 
-func New(reader *kafka.Reader) *Broker {
-	return &Broker{consumer: reader}
+func New(reader *kafka.Reader, repo Repository, batchSize int, flushInterval time.Duration) *Consumer {
+	return &Consumer{reader: reader, repo: repo, batchSize: batchSize, flushInterval: flushInterval}
 }
 
-func (b *Broker) ReadMessages(ctx context.Context, batchSize int, flushInterval time.Duration) (*Batch, error) {
+func (c *Consumer) Run(ctx context.Context) error {
+	return nil
+}
+
+func (b *Consumer) ReadMessages(ctx context.Context, batchSize int, flushInterval time.Duration) (*batch, error) {
 	if batchSize <= 0 {
 		return nil, fmt.Errorf("batch size must be positive")
 	}
 
-	batch := &Batch{
+	batch := &batch{
 		Events:   make([]domain.ClickEvent, 0, batchSize),
 		Messages: make([]kafka.Message, 0, batchSize),
 	}
@@ -37,7 +48,7 @@ func (b *Broker) ReadMessages(ctx context.Context, batchSize int, flushInterval 
 	defer time.Stop()
 
 	for len(batch.Events) < batchSize {
-		message, err := b.consumer.FetchMessage(ctx)
+		message, err := b.reader.FetchMessage(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("fetch kafka message: %w", err)
 		}
@@ -56,12 +67,12 @@ func (b *Broker) ReadMessages(ctx context.Context, batchSize int, flushInterval 
 	return batch, nil
 }
 
-func (b *Broker) CommitMessages(ctx context.Context, messages []kafka.Message) error {
+func (b *Consumer) CommitMessages(ctx context.Context, messages []kafka.Message) error {
 	if len(messages) == 0 {
 		return nil
 	}
 
-	if err := b.consumer.CommitMessages(ctx, messages...); err != nil {
+	if err := b.reader.CommitMessages(ctx, messages...); err != nil {
 		return fmt.Errorf("commit kafka messages: %w", err)
 	}
 

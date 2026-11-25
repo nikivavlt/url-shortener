@@ -16,7 +16,7 @@ type Config struct {
 	ClickHouseDB          string
 	ClickHouseUsername    string
 	ClickHousePassword    string
-	UrlServiceAddr        string
+	URLServiceAddr        string
 	AnalyticsServicerPort string
 }
 
@@ -40,7 +40,7 @@ func Load() (*Config, error) {
 		ClickHouseDB:          get("CLICKHOUSE_DB"),
 		ClickHouseUsername:    get("CLICKHOUSE_USERNAME"),
 		ClickHousePassword:    get("CLICKHOUSE_PASSWORD"),
-		UrlServiceAddr:        get("URL_SERVICE_ADDR"),
+		URLServiceAddr:        get("URL_SERVICE_ADDR"),
 		AnalyticsServicerPort: get("ANALYTICS_SERVICE_PORT"),
 	}
 
