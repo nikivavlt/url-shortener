@@ -35,7 +35,13 @@ func main() {
 	}
 	defer urlClient.Close()
 
-	h := handler.New(userClient, urlClient)
+	analyticsClient, err := client.DialAnalytics(cfg.AnalyticsServiceAddr)
+	if err != nil {
+		log.Fatalf("analytics service client: %v", err)
+	}
+	defer analyticsClient.Close()
+
+	h := handler.New(userClient, urlClient, analyticsClient)
 	server := &http.Server{
 		Addr:              ":" + cfg.GatewayPort,
 		Handler:           h.Router(middleware.NewAuth(userClient)),

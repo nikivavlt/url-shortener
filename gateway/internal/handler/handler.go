@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/nikivavlt/url-shortener/gateway/internal/middleware"
+	analyticsv1 "github.com/nikivavlt/url-shortener/shared/pkg/proto/analytics/v1"
 	urlv1 "github.com/nikivavlt/url-shortener/shared/pkg/proto/url/v1"
 	userv1 "github.com/nikivavlt/url-shortener/shared/pkg/proto/user/v1"
 	"google.golang.org/grpc/codes"
@@ -23,6 +24,7 @@ const (
 	defaultPageSize = 20
 	maxPageSize     = 100
 	maxBodyBytes    = 1 << 20
+	maxDays         = 365
 )
 
 type userClient interface {
@@ -39,12 +41,19 @@ type urlClient interface {
 	Redirect(context.Context, *urlv1.RedirectRequest) (*urlv1.RedirectResponse, error)
 }
 
-type Handler struct {
-	users userClient
-	urls  urlClient
+type analyticsClient interface {
+	GetAnalytics(ctx context.Context, request *analyticsv1.GetAnalyticsRequest) (*analyticsv1.GetAnalyticsResponse, error)
 }
 
-func New(users userClient, urls urlClient) *Handler { return &Handler{users: users, urls: urls} }
+type Handler struct {
+	users     userClient
+	urls      urlClient
+	analytics analyticsClient
+}
+
+func New(users userClient, urls urlClient, analytics analyticsClient) *Handler {
+	return &Handler{users: users, urls: urls, analytics: analytics}
+}
 
 func (h *Handler) Router(auth func(http.Handler) http.Handler) http.Handler {
 	r := chi.NewRouter()
@@ -59,8 +68,43 @@ func (h *Handler) Router(auth func(http.Handler) http.Handler) http.Handler {
 		r.Post("/api/v1/urls", h.createURL)
 		r.Get("/api/v1/urls", h.listURLs)
 		r.Delete("/api/v1/urls/{code}", h.deleteURL)
+		r.Get("/api/v1/analytics/{code}", h.getAnalytics)
 	})
 	return r
+}
+
+func (h *Handler) getAnalytics(w http.ResponseWriter, r *http.Request) {
+	days, err := daysParam(r.URL.Query().Get("days"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	response, err := h.analytics.GetAnalytics(r.Context(), &analyticsv1.GetAnalyticsRequest{
+		ShortCode: chi.URLParam(r, "code"),
+		UserId:    middleware.UserID(r.Context()),
+		Days:      days,
+	})
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+
+	byDay := make([]dayClicksResponse, 0, len(response.GetClicksByDay()))
+	for _, d := range response.GetClicksByDay() {
+		byDay = append(byDay, dayClicksResponse{Date: d.GetDate(), Clicks: d.GetClicks()})
+	}
+
+	referers := make([]refererClicksResponse, 0, len(response.GetTopReferers()))
+	for _, ref := range response.GetTopReferers() {
+		referers = append(referers, refererClicksResponse{Referer: ref.GetReferer(), Clicks: ref.GetClicks()})
+	}
+
+	writeJSON(w, http.StatusOK, analyticsResponse{
+		TotalClicks: response.GetTotalClicks(),
+		ClicksByDay: byDay,
+		TopReferers: referers,
+	})
 }
 
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
@@ -165,6 +209,20 @@ func (h *Handler) redirect(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusFound)
 }
 
+type analyticsResponse struct {
+	TotalClicks int64                   `json:"total_clicks"`
+	ClicksByDay []dayClicksResponse     `json:"clicks_by_day"`
+	TopReferers []refererClicksResponse `json:"top_referers"`
+}
+type dayClicksResponse struct {
+	Date   string `json:"date"`
+	Clicks int64  `json:"clicks"`
+}
+type refererClicksResponse struct {
+	Referer string `json:"referer"`
+	Clicks  int64  `json:"clicks"`
+}
+
 type credentialsRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -226,6 +284,21 @@ func pageLimit(value string) (int32, error) {
 		limit = maxPageSize
 	}
 	return int32(limit), nil
+}
+
+// daysParam returns 0 when the parameter is absent; the analytics service then applies its default.
+func daysParam(value string) (int32, error) {
+	if value == "" {
+		return 0, nil
+	}
+	days, err := strconv.Atoi(value)
+	if err != nil || days < 1 {
+		return 0, errors.New("days must be a positive integer")
+	}
+	if days > maxDays {
+		days = maxDays
+	}
+	return int32(days), nil
 }
 
 func requestIP(r *http.Request) string {
