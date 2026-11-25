@@ -3,7 +3,9 @@ package consumer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/nikivavlt/url-shortener/analytics/internal/domain"
@@ -21,60 +23,56 @@ type Consumer struct {
 	flushInterval time.Duration
 }
 
-type batch struct {
-	Events   []domain.ClickEvent
-	Messages []kafka.Message
-}
-
 func New(reader *kafka.Reader, repo Repository, batchSize int, flushInterval time.Duration) *Consumer {
 	return &Consumer{reader: reader, repo: repo, batchSize: batchSize, flushInterval: flushInterval}
 }
 
 func (c *Consumer) Run(ctx context.Context) error {
-	return nil
+	for {
+		events, messages, err := c.readBatch(ctx)
+		if err == nil && len(messages) > 0 {
+			if err = c.repo.InsertBatch(ctx, events); err == nil {
+				err = c.reader.CommitMessages(ctx, messages...)
+			}
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+	}
 }
 
-func (b *Consumer) ReadMessages(ctx context.Context, batchSize int, flushInterval time.Duration) (*batch, error) {
-	if batchSize <= 0 {
-		return nil, fmt.Errorf("batch size must be positive")
-	}
+func (c *Consumer) readBatch(ctx context.Context) ([]domain.ClickEvent, []kafka.Message, error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, c.flushInterval)
+	defer cancel()
 
-	batch := &batch{
-		Events:   make([]domain.ClickEvent, 0, batchSize),
-		Messages: make([]kafka.Message, 0, batchSize),
-	}
+	var (
+		events   []domain.ClickEvent
+		messages []kafka.Message
+	)
 
-	time := time.NewTimer(flushInterval)
-	defer time.Stop()
-
-	for len(batch.Events) < batchSize {
-		message, err := b.reader.FetchMessage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("fetch kafka message: %w", err)
+	for len(events) < c.batchSize {
+		msg, err := c.reader.FetchMessage(fetchCtx)
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			break
 		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("fetch kafka message: %w", err)
+		}
+		messages = append(messages, msg)
 
 		clickEvent := domain.ClickEvent{}
 
-		if err := json.Unmarshal(message.Value, &clickEvent); err != nil {
-			return nil, fmt.Errorf("decode kafka message: %w", err)
+		if err := json.Unmarshal(msg.Value, &clickEvent); err != nil {
+			log.Printf("skip undecodable message partition=%d offset=%d: %v", msg.Partition, msg.Offset, err)
+			continue
 		}
 
 		// log.Printf("Received click event: %+v", event)
-		batch.Events = append(batch.Events, clickEvent)
-		batch.Messages = append(batch.Messages, message)
+		events = append(events, clickEvent)
 	}
 
-	return batch, nil
-}
-
-func (b *Consumer) CommitMessages(ctx context.Context, messages []kafka.Message) error {
-	if len(messages) == 0 {
-		return nil
-	}
-
-	if err := b.reader.CommitMessages(ctx, messages...); err != nil {
-		return fmt.Errorf("commit kafka messages: %w", err)
-	}
-
-	return nil
+	return events, messages, nil
 }
