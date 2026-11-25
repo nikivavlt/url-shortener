@@ -70,7 +70,8 @@ func (c *Consumer) readBatch(ctx context.Context) ([]domain.ClickEvent, []kafka.
 			continue
 		}
 
-		// log.Printf("Received click event: %+v", event)
+		log.Printf("Received click event: %s", clickEvent)
+
 		events = append(events, clickEvent)
 	}
 

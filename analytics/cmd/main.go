@@ -104,8 +104,6 @@ func run() error {
 		return fmt.Errorf("listen: %w", err)
 	}
 
-	// think about this flow
-
 	// Run consumer
 	consumerDone := make(chan struct{})
 	var consumerErr error
