@@ -144,7 +144,7 @@ func start(t *testing.T, c *Consumer) (stop func() error) {
 
 func TestRun_FullBatchInsertedThenCommitted(t *testing.T) {
 	reader, repo, l := newFakes(validMsg(1, "a"), validMsg(2, "b"), validMsg(3, "c"))
-	stop := start(t, New(reader, repo, 3, time.Hour))
+	stop := start(t, New(reader, repo, 3, time.Hour, time.Second))
 
 	waitFor(t, func() bool { return len(reader.commits()) == 1 })
 	if err := stop(); err != nil {
@@ -164,7 +164,7 @@ func TestRun_FullBatchInsertedThenCommitted(t *testing.T) {
 
 func TestRun_PartialBatchFlushedOnTimer(t *testing.T) {
 	reader, repo, _ := newFakes(validMsg(1, "a"), validMsg(2, "b"))
-	stop := start(t, New(reader, repo, 100, 50*time.Millisecond))
+	stop := start(t, New(reader, repo, 100, 50*time.Millisecond, time.Second))
 
 	waitFor(t, func() bool { return len(reader.commits()) == 1 })
 	if err := stop(); err != nil {
@@ -177,7 +177,7 @@ func TestRun_PartialBatchFlushedOnTimer(t *testing.T) {
 
 func TestRun_PoisonMessageSkippedButCommitted(t *testing.T) {
 	reader, repo, _ := newFakes(validMsg(1, "a"), poisonMsg(2))
-	stop := start(t, New(reader, repo, 100, 50*time.Millisecond))
+	stop := start(t, New(reader, repo, 100, 50*time.Millisecond, time.Second))
 
 	waitFor(t, func() bool { return len(reader.commits()) == 1 })
 	if err := stop(); err != nil {
@@ -197,7 +197,7 @@ func TestRun_InsertFailureReturnsErrorWithoutCommit(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := New(reader, repo, 2, time.Hour).Run(ctx)
+	err := New(reader, repo, 2, time.Hour, time.Second).Run(ctx)
 
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("Run returned %v, want errBoom", err)
@@ -213,7 +213,7 @@ func TestRun_CommitFailureReturnsError(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := New(reader, repo, 1, time.Hour).Run(ctx)
+	err := New(reader, repo, 1, time.Hour, time.Second).Run(ctx)
 
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("Run returned %v, want errBoom", err)
@@ -222,12 +222,52 @@ func TestRun_CommitFailureReturnsError(t *testing.T) {
 
 func TestRun_ShutdownWhileIdleReturnsNil(t *testing.T) {
 	reader, repo, _ := newFakes()
-	stop := start(t, New(reader, repo, 100, time.Hour))
+	stop := start(t, New(reader, repo, 100, time.Hour, time.Second))
 
 	if err := stop(); err != nil {
 		t.Fatalf("Run returned %v, want nil", err)
 	}
 	if got := repo.inserted(); len(got) != 0 {
 		t.Fatalf("unexpected inserts: %+v", got)
+	}
+}
+
+func TestRun_ShutdownFlushesPendingBatch(t *testing.T) {
+	reader, repo, _ := newFakes(
+		validMsg(1, "a"),
+		validMsg(2, "b"),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		done <- New(reader, repo, 100, time.Hour, time.Second).Run(ctx)
+	}()
+
+	// Wait until both messages have been fetched.
+	waitFor(t, func() bool {
+		reader.mu.Lock()
+		defer reader.mu.Unlock()
+		return len(reader.queue) == 0
+	})
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not flush pending batch after cancellation")
+	}
+
+	if got := repo.inserted(); len(got) != 1 || len(got[0]) != 2 {
+		t.Fatalf("inserted batches = %+v, want one batch of 2", got)
+	}
+
+	if got := reader.commits(); len(got) != 1 || len(got[0]) != 2 {
+		t.Fatalf("commits = %+v, want one commit of 2 messages", got)
 	}
 }

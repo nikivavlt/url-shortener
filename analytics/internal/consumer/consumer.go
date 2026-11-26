@@ -22,29 +22,48 @@ type Reader interface {
 }
 
 type Consumer struct {
-	reader        Reader
-	repo          Repository
-	batchSize     int
-	flushInterval time.Duration
+	reader         Reader
+	repo           Repository
+	batchSize      int
+	flushInterval  time.Duration
+	processTimeout time.Duration
 }
 
-func New(reader Reader, repo Repository, batchSize int, flushInterval time.Duration) *Consumer {
-	return &Consumer{reader: reader, repo: repo, batchSize: batchSize, flushInterval: flushInterval}
+func New(
+	reader Reader,
+	repo Repository,
+	batchSize int,
+	flushInterval time.Duration,
+	processTimeout time.Duration,
+) *Consumer {
+	return &Consumer{
+		reader:         reader,
+		repo:           repo,
+		batchSize:      batchSize,
+		flushInterval:  flushInterval,
+		processTimeout: processTimeout,
+	}
 }
 
 func (c *Consumer) Run(ctx context.Context) error {
 	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		events, messages, err := c.readBatch(ctx)
-		if err == nil && len(messages) > 0 {
-			if err = c.repo.InsertBatch(ctx, events); err == nil {
-				err = c.reader.CommitMessages(ctx, messages...)
+		if len(messages) > 0 {
+			if processErr := c.processBatch(events, messages); processErr != nil {
+				return processErr
 			}
 		}
+
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
 			return err
+		}
+
+		if ctx.Err() != nil {
+			return nil
 		}
 	}
 }
@@ -58,24 +77,56 @@ func (c *Consumer) readBatch(ctx context.Context) ([]domain.ClickEvent, []kafka.
 		messages []kafka.Message
 	)
 
-	for len(events) < c.batchSize {
+	for len(messages) < c.batchSize {
 		msg, err := c.reader.FetchMessage(fetchCtx)
-		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			break
-		}
+
 		if err != nil {
-			return nil, nil, fmt.Errorf("fetch kafka message: %w", err)
+			if ctx.Err() != nil {
+				return events, messages, nil
+			}
+
+			if errors.Is(err, context.DeadlineExceeded) {
+				return events, messages, nil
+			}
+
+			return events, messages, fmt.Errorf(
+				"fetch kafka message: %w", err,
+			)
 		}
+
 		messages = append(messages, msg)
 
-		clickEvent := domain.ClickEvent{}
+		var event domain.ClickEvent
 
-		if err := json.Unmarshal(msg.Value, &clickEvent); err != nil {
-			log.Printf("skip undecodable message partition=%d offset=%d: %v", msg.Partition, msg.Offset, err)
+		if err := json.Unmarshal(msg.Value, &event); err != nil {
+			log.Printf(
+				"skip undecodable message partition=%d offset=%d: %v",
+				msg.Partition,
+				msg.Offset,
+				err,
+			)
 			continue
 		}
-		events = append(events, clickEvent)
+
+		events = append(events, event)
 	}
 
 	return events, messages, nil
+}
+
+func (c *Consumer) processBatch(events []domain.ClickEvent, messages []kafka.Message) error {
+	ctx, cancel := context.WithTimeout(context.Background(), c.processTimeout)
+	defer cancel()
+
+	if len(events) > 0 {
+		if err := c.repo.InsertBatch(ctx, events); err != nil {
+			return fmt.Errorf("insert click events: %w", err)
+		}
+	}
+
+	if err := c.reader.CommitMessages(ctx, messages...); err != nil {
+		return fmt.Errorf("commit kafka messages: %w", err)
+	}
+
+	return nil
 }

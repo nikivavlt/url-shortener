@@ -27,6 +27,7 @@ const (
 	shutdownTimeout = 10 * time.Second
 	batchSize       = 100
 	flushInterval   = 5 * time.Second
+	processTimeout  = 10 * time.Second
 )
 
 func main() {
@@ -90,7 +91,7 @@ func run() error {
 	defer reader.Close()
 
 	// Dependencies
-	cons := consumer.New(reader, repo, batchSize, flushInterval)
+	cons := consumer.New(reader, repo, batchSize, flushInterval, processTimeout)
 	svc := service.New(repo, urlClient)
 	h := handler.New(svc)
 
