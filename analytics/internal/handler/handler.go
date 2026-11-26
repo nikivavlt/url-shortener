@@ -31,7 +31,7 @@ func (h *AnalyticsHandler) GetAnalytics(ctx context.Context, req *analytics_v1.G
 		return nil, toGRPCError(err)
 	}
 
-	resp := &analytics_v1.GetAnalyticsResponse{TotalClicks: analytics.TotalClicks}
+	resp := &analytics_v1.GetAnalyticsResponse{ShortCode: req.GetShortCode(), TotalClicks: analytics.TotalClicks}
 	for _, d := range analytics.ByDay {
 		resp.ClicksByDay = append(resp.ClicksByDay, &analytics_v1.DayClicks{
 			Date: d.Date.Format("2006-01-02"), Clicks: d.Count,
