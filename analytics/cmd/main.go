@@ -128,10 +128,15 @@ func run() error {
 	case <-consumerDone:
 		if consumerErr != nil {
 			runErr = fmt.Errorf("consumer: %w", consumerErr)
+		} else {
+			runErr = fmt.Errorf("consumer stopped unexpectedly")
 		}
 	}
 
 	stop()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
 
 	grpcDone := make(chan struct{})
 	go func() {
@@ -141,15 +146,17 @@ func run() error {
 
 	select {
 	case <-grpcDone:
-	case <-time.After(shutdownTimeout):
-		log.Println("graceful shutdown timed out")
+		log.Println("grpc server stopped gracefully")
+	case <-shutdownCtx.Done():
+		log.Println("grpc graceful shutdown timed out")
 		grpcServer.Stop()
 	}
 
 	select {
 	case <-consumerDone:
-	case <-time.After(shutdownTimeout):
-		log.Println("consumer did not stop in time")
+		log.Println("consumer stopped gracefully")
+	case <-shutdownCtx.Done():
+		log.Println("consumer shutdown timed out")
 	}
 
 	return runErr
