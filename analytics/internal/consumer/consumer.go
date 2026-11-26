@@ -16,14 +16,19 @@ type Repository interface {
 	InsertBatch(ctx context.Context, events []domain.ClickEvent) error
 }
 
+type Reader interface {
+	FetchMessage(ctx context.Context) (kafka.Message, error)
+	CommitMessages(ctx context.Context, msgs ...kafka.Message) error
+}
+
 type Consumer struct {
-	reader        *kafka.Reader
+	reader        Reader
 	repo          Repository
 	batchSize     int
 	flushInterval time.Duration
 }
 
-func New(reader *kafka.Reader, repo Repository, batchSize int, flushInterval time.Duration) *Consumer {
+func New(reader Reader, repo Repository, batchSize int, flushInterval time.Duration) *Consumer {
 	return &Consumer{reader: reader, repo: repo, batchSize: batchSize, flushInterval: flushInterval}
 }
 
@@ -69,7 +74,6 @@ func (c *Consumer) readBatch(ctx context.Context) ([]domain.ClickEvent, []kafka.
 			log.Printf("skip undecodable message partition=%d offset=%d: %v", msg.Partition, msg.Offset, err)
 			continue
 		}
-
 		events = append(events, clickEvent)
 	}
 

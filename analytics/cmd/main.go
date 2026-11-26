@@ -45,11 +45,11 @@ func run() error {
 	defer stop()
 
 	// gRPC client
-	URLClient, err := client.DialURL(cfg.URLServiceAddr)
+	urlClient, err := client.DialURL(cfg.URLServiceAddr)
 	if err != nil {
 		return fmt.Errorf("url service client: %w", err)
 	}
-	defer URLClient.Close()
+	defer urlClient.Close()
 
 	// ClickHouse
 	conn, err := clickhouse.Open(&clickhouse.Options{
@@ -91,7 +91,7 @@ func run() error {
 
 	// Dependencies
 	cons := consumer.New(reader, repo, batchSize, flushInterval)
-	svc := service.New(repo, URLClient)
+	svc := service.New(repo, urlClient)
 	h := handler.New(svc)
 
 	// gRPC server
