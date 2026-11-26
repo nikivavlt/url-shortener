@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,8 +22,9 @@ import (
 	"testing"
 	"time"
 
-	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/go-connections/nat"
+	dockercontainer "github.com/moby/moby/api/types/container"
+	mobynetwork "github.com/moby/moby/api/types/network"
 	"github.com/segmentio/kafka-go"
 	tc "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -36,10 +38,11 @@ const (
 var testSystem *system
 
 type system struct {
-	postgres tc.Container
-	mongo    tc.Container
-	redis    tc.Container
-	kafka    tc.Container
+	postgres   tc.Container
+	mongo      tc.Container
+	redis      tc.Container
+	kafka      tc.Container
+	clickhouse tc.Container
 
 	kafkaBroker string
 	gatewayURL  string
@@ -47,7 +50,7 @@ type system struct {
 }
 
 func TestMain(m *testing.M) {
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
 	var err error
@@ -68,6 +71,9 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(code)
 }
+
+// NOTE: tests run in source order. TestRegisterLoginCreateShortURLRedirectPublishesClick
+// reads the FIRST message of click_events, so it must stay above every test that clicks.
 
 func TestRegisterLoginCreateShortURLRedirectPublishesClick(t *testing.T) {
 	email := uniqueEmail(t)
@@ -237,6 +243,144 @@ func TestListURLsRequiresAuthentication(t *testing.T) {
 	response.Body.Close()
 }
 
+// ---------------------------------------------------------------------------
+// Analytics: gateway -> url service -> Kafka -> analytics consumer -> ClickHouse -> gateway
+// ---------------------------------------------------------------------------
+
+type analyticsBody struct {
+	TotalClicks int64 `json:"total_clicks"`
+	ClicksByDay []struct {
+		Date   string `json:"date"`
+		Clicks int64  `json:"clicks"`
+	} `json:"clicks_by_day"`
+	TopReferers []struct {
+		Referer string `json:"referer"`
+		Clicks  int64  `json:"clicks"`
+	} `json:"top_referers"`
+}
+
+func TestAnalyticsAggregatesClicks(t *testing.T) {
+	email := uniqueEmail(t)
+	register(t, email, "strong-password")
+	token := login(t, email, "strong-password")
+	code := createShortURL(t, token, "https://example.com/analytics")
+
+	for i := 0; i < 3; i++ {
+		click(t, code, "https://a.example/")
+	}
+	click(t, code, "https://b.example/")
+	click(t, code, "")
+
+	// The consumer flushes every 5s or every 100 events, so poll.
+	got := waitForTotalClicks(t, token, code, 5)
+
+	var byDay int64
+	for _, d := range got.ClicksByDay {
+		byDay += d.Clicks // summed so a midnight rollover can't make the test flaky
+	}
+	if byDay != 5 {
+		t.Fatalf("clicks by day sum = %d, want 5 (%+v)", byDay, got.ClicksByDay)
+	}
+	if len(got.TopReferers) == 0 || got.TopReferers[0].Referer != "https://a.example/" || got.TopReferers[0].Clicks != 3 {
+		t.Fatalf("top referers = %+v, want a.example first with 3", got.TopReferers)
+	}
+}
+
+func TestAnalyticsForbiddenForNonOwner(t *testing.T) {
+	ownerEmail := uniqueEmail(t) + ".owner"
+	register(t, ownerEmail, "strong-password")
+	ownerToken := login(t, ownerEmail, "strong-password")
+	code := createShortURL(t, ownerToken, "https://example.com/private")
+
+	otherEmail := uniqueEmail(t) + ".other"
+	register(t, otherEmail, "strong-password")
+	otherToken := login(t, otherEmail, "strong-password")
+
+	response := do(t, authedGet(t, "/api/v1/analytics/"+code, otherToken), http.StatusForbidden)
+	_ = response.Body.Close()
+}
+
+func TestAnalyticsUnknownCodeIsNotFound(t *testing.T) {
+	email := uniqueEmail(t)
+	register(t, email, "strong-password")
+	token := login(t, email, "strong-password")
+
+	response := do(t, authedGet(t, "/api/v1/analytics/does-not-exist", token), http.StatusNotFound)
+	_ = response.Body.Close()
+}
+
+func TestAnalyticsRequiresAuth(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, testSystem.gatewayURL+"/api/v1/analytics/anything", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := do(t, request, http.StatusUnauthorized)
+	_ = response.Body.Close()
+}
+
+func TestAnalyticsInvalidDays(t *testing.T) {
+	email := uniqueEmail(t)
+	register(t, email, "strong-password")
+	token := login(t, email, "strong-password")
+	code := createShortURL(t, token, "https://example.com/days")
+
+	response := do(t, authedGet(t, "/api/v1/analytics/"+code+"?days=abc", token), http.StatusBadRequest)
+	_ = response.Body.Close()
+}
+
+func authedGet(t *testing.T, path, token string) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, testSystem.gatewayURL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	return request
+}
+
+// click performs one redirect without following it.
+func click(t *testing.T, code, referer string) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, testSystem.gatewayURL+"/"+code, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if referer != "" {
+		request.Header.Set("Referer", referer)
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusFound {
+		t.Fatalf("redirect status = %d, want %d", response.StatusCode, http.StatusFound)
+	}
+}
+
+func waitForTotalClicks(t *testing.T, token, code string, want int64) analyticsBody {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	var last analyticsBody
+	for time.Now().Before(deadline) {
+		response := do(t, authedGet(t, "/api/v1/analytics/"+code, token), http.StatusOK)
+		last = analyticsBody{}
+		decodeJSON(t, response.Body, &last)
+		_ = response.Body.Close()
+		if last.TotalClicks == want {
+			return last
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("total_clicks = %d after 30s, want %d", last.TotalClicks, want)
+	return last
+}
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
 func startSystem(ctx context.Context) (*system, error) {
 	s := &system{}
 	var err error
@@ -268,6 +412,22 @@ func startSystem(ctx context.Context) (*system, error) {
 	}); err != nil {
 		_ = s.close(context.Background())
 		return nil, fmt.Errorf("redis: %w", err)
+	}
+
+	// The HTTP /ping wait is more reliable than waiting on port 9000: the native
+	// port opens before ClickHouse finishes initializing.
+	if s.clickhouse, err = startContainer(ctx, tc.ContainerRequest{
+		Image:        "clickhouse/clickhouse-server:24.3-alpine",
+		ExposedPorts: []string{"9000/tcp", "8123/tcp"},
+		Env: map[string]string{
+			"CLICKHOUSE_DB":       "analytics",
+			"CLICKHOUSE_USER":     "test",
+			"CLICKHOUSE_PASSWORD": "test",
+		},
+		WaitingFor: wait.ForHTTP("/ping").WithPort("8123/tcp").WithStartupTimeout(containerStartTimeout),
+	}); err != nil {
+		_ = s.close(context.Background())
+		return nil, fmt.Errorf("clickhouse: %w", err)
 	}
 
 	kafkaPort, err := freePort()
@@ -315,11 +475,16 @@ func kafkaContainerRequest(hostPort int) tc.ContainerRequest {
 			"KAFKA_TRANSACTION_STATE_LOG_MIN_ISR":            "1",
 		},
 		HostConfigModifier: func(hostConfig *dockercontainer.HostConfig) {
-			hostConfig.PortBindings = nat.PortMap{
-				port: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: strconv.Itoa(hostPort)}},
+			hostConfig.PortBindings = mobynetwork.PortMap{
+				mobynetwork.MustParsePort("9092/tcp"): []mobynetwork.PortBinding{
+					{
+						HostIP:   netip.MustParseAddr("127.0.0.1"),
+						HostPort: strconv.Itoa(hostPort),
+					},
+				},
 			}
 		},
-		WaitingFor: wait.ForListeningPort(port).WithStartupTimeout(containerStartTimeout),
+		WaitingFor: wait.ForListeningPort(string(port)).WithStartupTimeout(containerStartTimeout),
 	}
 }
 
@@ -356,12 +521,20 @@ func (s *system) startServices(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	clickhouseHost, clickhousePort, err := endpoint(ctx, s.clickhouse, "9000/tcp")
+	if err != nil {
+		return err
+	}
 
 	userPort, err := freePort()
 	if err != nil {
 		return err
 	}
 	urlPort, err := freePort()
+	if err != nil {
+		return err
+	}
+	analyticsPort, err := freePort()
 	if err != nil {
 		return err
 	}
@@ -381,6 +554,7 @@ func (s *system) startServices(ctx context.Context) error {
 
 	userAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort))
 	urlAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(urlPort))
+	analyticsAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(analyticsPort))
 	s.gatewayURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(gatewayPort))
 	common := map[string]string{
 		"REDIS_HOST": redisHost,
@@ -410,10 +584,25 @@ func (s *system) startServices(ctx context.Context) error {
 		return err
 	}
 
+	// Values set here win over analytics/.env: godotenv never overrides variables that are already set.
+	analyticsEnv := map[string]string{
+		"KAFKA_BROKERS":          s.kafkaBroker,
+		"CLICKHOUSE_ADDR":        net.JoinHostPort(clickhouseHost, clickhousePort),
+		"CLICKHOUSE_DB":          "analytics",
+		"CLICKHOUSE_USERNAME":    "test",
+		"CLICKHOUSE_PASSWORD":    "test",
+		"URL_SERVICE_ADDR":       urlAddress,
+		"ANALYTICS_SERVICE_PORT": strconv.Itoa(analyticsPort),
+	}
+	if err := s.startService(root, binaries["analytics"], analyticsEnv, analyticsAddress); err != nil {
+		return err
+	}
+
 	gatewayEnv := map[string]string{
-		"GATEWAY_PORT":      strconv.Itoa(gatewayPort),
-		"USER_SERVICE_ADDR": userAddress,
-		"URL_SERVICE_ADDR":  urlAddress,
+		"GATEWAY_PORT":           strconv.Itoa(gatewayPort),
+		"USER_SERVICE_ADDR":      userAddress,
+		"URL_SERVICE_ADDR":       urlAddress,
+		"ANALYTICS_SERVICE_ADDR": analyticsAddress, // verify this name against gateway/internal/config
 	}
 	if err := s.startService(root, binaries["gateway"], gatewayEnv, net.JoinHostPort("127.0.0.1", strconv.Itoa(gatewayPort))); err != nil {
 		return err
@@ -422,12 +611,17 @@ func (s *system) startServices(ctx context.Context) error {
 }
 
 func buildServices(ctx context.Context, root string) (map[string]string, error) {
-	binaries := make(map[string]string, 3)
+	binaries := make(map[string]string, 4)
 	dir, err := os.MkdirTemp("", "url-shortener-integration-")
 	if err != nil {
 		return nil, err
 	}
-	for name, pkg := range map[string]string{"user": "./user/cmd", "url": "./url/cmd", "gateway": "./gateway/cmd"} {
+	for name, pkg := range map[string]string{
+		"user":      "./user/cmd",
+		"url":       "./url/cmd",
+		"analytics": "./analytics/cmd",
+		"gateway":   "./gateway/cmd",
+	} {
 		binary := filepath.Join(dir, name)
 		command := exec.CommandContext(ctx, "go", "build", "-o", binary, pkg)
 		command.Dir = root
@@ -445,7 +639,7 @@ func endpoint(ctx context.Context, container tc.Container, port nat.Port) (strin
 	if err != nil {
 		return "", "", err
 	}
-	mapped, err := container.MappedPort(ctx, port)
+	mapped, err := container.MappedPort(ctx, string(port))
 	if err != nil {
 		return "", "", err
 	}
@@ -497,7 +691,7 @@ func (s *system) close(ctx context.Context) error {
 			errs = append(errs, err)
 		}
 	}
-	for _, container := range []tc.Container{s.kafka, s.redis, s.mongo, s.postgres} {
+	for _, container := range []tc.Container{s.clickhouse, s.kafka, s.redis, s.mongo, s.postgres} {
 		if container != nil {
 			if err := container.Terminate(ctx); err != nil {
 				errs = append(errs, err)
