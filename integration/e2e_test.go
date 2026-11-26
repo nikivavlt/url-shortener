@@ -162,6 +162,81 @@ func TestRegisteredUserCanListCreatedURL(t *testing.T) {
 	}
 }
 
+func TestRedirectWorksOnCacheHit(t *testing.T) {
+	email := uniqueEmail(t)
+	password := "strong-password"
+
+	register(t, email, password)
+	token := login(t, email, password)
+	code := createShortURL(t, token, "https://example.com/cache-test")
+
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	for i := 1; i <= 2; i++ {
+		request, err := http.NewRequest(
+			http.MethodGet,
+			testSystem.gatewayURL+"/"+code,
+			nil,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+
+		if response.StatusCode != http.StatusFound {
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			t.Fatalf(
+				"request %d: status = %d, want %d; body=%s",
+				i, response.StatusCode, http.StatusFound, body,
+			)
+		}
+
+		if got := response.Header.Get("Location"); got != "https://example.com/cache-test" {
+			response.Body.Close()
+			t.Fatalf("request %d: location = %q", i, got)
+		}
+
+		response.Body.Close()
+	}
+}
+
+func TestRedirectUnknownShortCodeReturnsNotFound(t *testing.T) {
+	request, err := http.NewRequest(
+		http.MethodGet,
+		testSystem.gatewayURL+"/unknown-code",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := do(t, request, http.StatusNotFound)
+	response.Body.Close()
+}
+
+func TestListURLsRequiresAuthentication(t *testing.T) {
+	request, err := http.NewRequest(
+		http.MethodGet,
+		testSystem.gatewayURL+"/api/v1/urls",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := do(t, request, http.StatusUnauthorized)
+	response.Body.Close()
+}
+
 func startSystem(ctx context.Context) (*system, error) {
 	s := &system{}
 	var err error
