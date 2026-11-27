@@ -65,7 +65,7 @@ func (r *AnalyticsRepository) GetAnalytics(ctx context.Context, shortCode string
 	res := &domain.Analytics{}
 
 	if err := r.conn.QueryRow(ctx, `
-	SELECT toInt64(count()) FROM click_events WHERE short_code = ?`, shortCode,
+	SELECT toInt64(count()) FROM click_events WHERE short_code = ? AND clicked_at >= now() - INTERVAL ? DAY`, shortCode, days,
 	).Scan(&res.TotalClicks); err != nil {
 		return nil, fmt.Errorf("query total: %w", err)
 	}
