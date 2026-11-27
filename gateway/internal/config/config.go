@@ -10,9 +10,10 @@ import (
 )
 
 type Config struct {
-	GatewayPort     string
-	UserServiceAddr string
-	UrlServiceAddr  string
+	GatewayPort          string
+	UserServiceAddr      string
+	UrlServiceAddr       string
+	AnalyticsServiceAddr string
 }
 
 func Load() (*Config, error) {
@@ -30,9 +31,10 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		GatewayPort:     get("GATEWAY_PORT"),
-		UserServiceAddr: get("USER_SERVICE_ADDR"),
-		UrlServiceAddr:  get("URL_SERVICE_ADDR"),
+		GatewayPort:          get("GATEWAY_PORT"),
+		UserServiceAddr:      get("USER_SERVICE_ADDR"),
+		UrlServiceAddr:       get("URL_SERVICE_ADDR"),
+		AnalyticsServiceAddr: get("ANALYTICS_SERVICE_ADDR"),
 	}
 
 	if len(missing) > 0 {

@@ -18,6 +18,9 @@ run-user:
 run-url:
 	go run ./url/cmd
 
+run-analytics:
+	go run ./analytics/cmd
+
 # Tests
 test:
 	go test -race -v ./user/...

@@ -24,11 +24,20 @@ func New(rdb redis.UniversalClient) *Cache {
 }
 
 type cachedLink struct {
-	OriginalURL string `json:"original_url"`
-	UserID      string `json:"user_id"`
+	ID          string     `json:"id"`
+	ShortCode   string     `json:"short_code"`
+	OriginalURL string     `json:"original_url"`
+	UserID      string     `json:"user_id"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	IsActive    bool       `json:"is_active"`
 }
 
-func (c *Cache) GetLink(ctx context.Context, shortCode string) (*domain.Link, error) {
+func (c *Cache) GetLink(
+	ctx context.Context,
+	shortCode string,
+) (*domain.Link, error) {
 	v, err := c.rdb.Get(ctx, linkKey(shortCode)).Result()
 	if errors.Is(err, redis.Nil) {
 		return nil, domain.ErrCacheMiss
@@ -41,14 +50,41 @@ func (c *Cache) GetLink(ctx context.Context, shortCode string) (*domain.Link, er
 	if err := json.Unmarshal([]byte(v), &cached); err != nil {
 		return nil, fmt.Errorf("decode cached link: %w", err)
 	}
-	return &domain.Link{ShortCode: shortCode, OriginalURL: cached.OriginalURL, UserID: cached.UserID}, nil
+
+	return &domain.Link{
+		ID:          cached.ID,
+		ShortCode:   cached.ShortCode,
+		OriginalURL: cached.OriginalURL,
+		UserID:      cached.UserID,
+		CreatedAt:   cached.CreatedAt,
+		UpdatedAt:   cached.UpdatedAt,
+		ExpiresAt:   cached.ExpiresAt,
+		IsActive:    cached.IsActive,
+	}, nil
 }
 
-func (c *Cache) SetLink(ctx context.Context, shortCode string, link *domain.Link, ttl time.Duration) error {
-	data, err := json.Marshal(cachedLink{OriginalURL: link.OriginalURL, UserID: link.UserID})
+func (c *Cache) SetLink(
+	ctx context.Context,
+	shortCode string,
+	link *domain.Link,
+	ttl time.Duration,
+) error {
+	cached := cachedLink{
+		ID:          link.ID,
+		ShortCode:   link.ShortCode,
+		OriginalURL: link.OriginalURL,
+		UserID:      link.UserID,
+		CreatedAt:   link.CreatedAt,
+		UpdatedAt:   link.UpdatedAt,
+		ExpiresAt:   link.ExpiresAt,
+		IsActive:    link.IsActive,
+	}
+
+	data, err := json.Marshal(cached)
 	if err != nil {
 		return fmt.Errorf("encode cached link: %w", err)
 	}
+
 	return c.rdb.Set(ctx, linkKey(shortCode), data, ttl).Err()
 }
 

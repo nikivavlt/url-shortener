@@ -201,6 +201,8 @@ func (s *URLService) Redirect(ctx context.Context, in domain.RedirectInput) (str
 	}
 
 	link, err := s.cache.GetLink(ctx, in.ShortCode)
+	cacheMiss := err != nil
+
 	switch {
 	case err == nil:
 		// Cache hit - continue
@@ -221,12 +223,15 @@ func (s *URLService) Redirect(ctx context.Context, in domain.RedirectInput) (str
 
 	s.publishClickAsync(ctx, s.clickEvent(link, in))
 
-	var ttl time.Duration
-	if link.ExpiresAt != nil {
-		ttl = link.ExpiresAt.Sub(now)
-	}
-	if err := s.cache.SetLink(ctx, in.ShortCode, link, ttl); err != nil {
-		s.log.Warn("redirect cache write failed", "short_code", in.ShortCode, "err", err)
+	if cacheMiss {
+		var ttl time.Duration
+		if link.ExpiresAt != nil {
+			ttl = link.ExpiresAt.Sub(now)
+		}
+
+		if err := s.cache.SetLink(ctx, in.ShortCode, link, ttl); err != nil {
+			s.log.Warn("redirect cache write failed", "short_code", in.ShortCode, "err", err)
+		}
 	}
 
 	return link.OriginalURL, nil

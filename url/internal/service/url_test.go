@@ -272,7 +272,12 @@ func TestRedirect_CacheHit_PublishesClick(t *testing.T) {
 	input := domain.RedirectInput{ShortCode: "abc1234", IP: "127.0.0.1", UserAgent: "grpcurl", Referer: "https://example.test"}
 
 	d.cache.EXPECT().GetLink(mock.Anything, "abc1234").
-		Return(&domain.Link{ShortCode: "abc1234", OriginalURL: "https://example.com", UserID: "u1"}, nil).Once()
+		Return(&domain.Link{
+			ShortCode:   "abc1234",
+			OriginalURL: "https://example.com",
+			UserID:      "u1",
+			IsActive:    true,
+		}, nil).Once()
 	d.broker.EXPECT().WriteMessages(mock.Anything, domain.BrokerMessage{
 		ShortCode: "abc1234", UserID: "u1", ClickedAt: fixedNow,
 		IP: "127.0.0.1", UserAgent: "grpcurl", Referer: "https://example.test",

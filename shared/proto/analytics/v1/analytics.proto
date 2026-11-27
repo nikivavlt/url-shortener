@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package analytics.v1;
+option go_package = "github.com/nikivavlt/url-shortener/shared/pkg/proto/analytics/v1;analytics_v1";
+
+service AnalyticsService {
+  rpc GetAnalytics (GetAnalyticsRequest) returns (GetAnalyticsResponse);
+}
+
+message DayClicks {
+    string date = 1;
+    int64 clicks = 2;
+}
+
+message RefererClicks {
+    string referer = 1;
+    int64 clicks = 2;
+}
+
+message GetAnalyticsRequest { string short_code = 1; string user_id = 2; int32 days = 3; }
+
+message GetAnalyticsResponse { string short_code = 1; int64 total_clicks = 2; repeated DayClicks clicks_by_day = 3; repeated RefererClicks top_referers = 4; }
